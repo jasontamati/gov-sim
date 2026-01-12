@@ -1,27 +1,23 @@
-// Governance MPL-B (Tools) - full file
-// What this branch tests:
-// - Does "efficiency + maintenance" (Tools with decay) prevent late-game coasting?
-// - Do allocation trade-offs (Food vs Wood vs Tools) stay meaningful over 50 days?
-// - Does neglect cause gradual systemic decline (not just sudden famine)?
+// Governance MPL - rewritten game loop (HTML/CSS/JS)
+// Goals of this rewrite:
+// - Keep "tick()" deterministic and single-responsibility.
+// - Support BOTH real-time and turn-based (End Day) without touching tick logic.
+// - Add variable speed controls + clean pause handling.
+// - Keep architecture simple: state -> tick -> render; actions mutate state; events are declarative.
 //
-// Notes:
-// - Population remains capped/static by default (only decreases via events/starvation).
-// - Tools are a shared pool that boosts productivity with diminishing returns.
-// - Tools decay daily (wear) and can be replenished by assigning workers to Tools.
-//
-// UI IDs expected (existing from MPL-A):
+// Requires existing IDs in index.html:
 // day, statusBadge, pop, food, wood, stab, rates, farms, log, eventBox,
 // toggleTick, reset, wfFood, wfWood, wfFoodVal, wfWoodVal
 //
-// OPTIONAL UI IDs for Tools (recommended for MPL-B):
-// tools (stat display), wfTools (range input), wfToolsVal (span value)
-//
-// OPTIONAL time controls (supported if present):
-// endDay, and/or any element with data-speed="5000" etc.
+// OPTIONAL (supported if you add them to HTML):
+// endDay, speed buttons (or any buttons with data-speed="10000|5000|2500")
 
 (() => {
   "use strict";
 
+  // -------------------------------
+  // DOM
+  // -------------------------------
   const $ = (id) => document.getElementById(id);
 
   const ui = {
@@ -33,62 +29,56 @@
     stab: $("stab"),
     rates: $("rates"),
     farms: $("farms"),
-    tools: $("tools"), // optional
-
     log: $("log"),
     eventBox: $("eventBox"),
 
     toggleTick: $("toggleTick"),
     reset: $("reset"),
-    endDay: $("endDay"), // optional
 
+    endDay: $("endDay"), // optional
     wfFood: $("wfFood"),
     wfWood: $("wfWood"),
-    wfTools: $("wfTools"), // optional
-
     wfFoodVal: $("wfFoodVal"),
     wfWoodVal: $("wfWoodVal"),
-    wfToolsVal: $("wfToolsVal"), // optional
   };
 
   // -------------------------------
-  // Balance constants
+  // Constants (tune here)
   // -------------------------------
   const CONFIG = {
     // Time control
-    DEFAULT_MODE: "auto",      // "auto" | "manual"
-    DEFAULT_SPEED_MS: 5000,    // 1 day = 5 seconds
+    DEFAULT_MODE: "auto", // "auto" | "manual"
+    DEFAULT_SPEED_MS: 5000, // 1 day = 5 seconds (auto mode)
 
-    // Base production
+    // Economy
     FOOD_PER_WORKER: 1.0,
     WOOD_PER_WORKER: 0.8,
 
-    // Farms
     FARM_WOOD_COST: 30,
-    FARM_FOOD_MULT_PER_FARM: 0.08,  // +8% food output per farm
+    FARM_FOOD_MULT_PER_FARM: 0.08, // +8% food output per farm
 
     // Consumption
     FOOD_CONSUMPTION_PER_POP: 1.0,
     RATION_CONSUMPTION_MULT: 0.75,
     FEAST_CONSUMPTION_MULT: 1.25,
 
-    // Policies (days)
+    // Policies durations (days)
     RATION_DAYS: 5,
     FEAST_DAYS: 3,
 
-    // Stability
-    STAB_MIN: 0,
+    // Stability dynamics
     STAB_MAX: 100,
+    STAB_MIN: 0,
 
     // Starvation penalties
-    STARVATION_STAB_LOSS_MULT: 0.15,
+    STARVATION_STAB_LOSS_MULT: 0.15, // per missing food unit
     STARVATION_STAB_LOSS_MIN: 2,
     STARVATION_STAB_LOSS_MAX: 18,
-    STARVATION_DEATH_DEFICIT_RATIO: 0.8,
+    STARVATION_DEATH_DEFICIT_RATIO: 0.8, // deficit > pop*ratio can kill
     STARVATION_DEATH_CHANCE: 0.5,
 
     // Ambient stability drift
-    STAB_DRIFT_UP_IF_WELL_FED_RATIO: 3,
+    STAB_DRIFT_UP_IF_WELL_FED_RATIO: 3, // food > pop*ratio => drift up
     STAB_DRIFT_UP: 0.6,
     STAB_DRIFT_CAP: 85,
     STAB_DRIFT_DOWN_IF_TOO_HIGH: 0.2,
@@ -99,69 +89,43 @@
     EVENT_STARVATION_BONUS: 0.12,
     EVENT_LOWSTAB_BONUS: 0.10,
     LOW_STABILITY_THRESHOLD: 35,
-    STARVATION_RISK_FOOD_RATIO: 2,
+    STARVATION_RISK_FOOD_RATIO: 2, // food < pop*ratio => risk
 
     // Win/Lose
     WIN_DAY: 50,
-
-    // -------------------------------
-    // Tools system (MPL-B core)
-    // -------------------------------
-
-    // Toolmaking:
-    // Each worker on tools attempts to produce TOOLS_PER_WORKER tools per day,
-    // but is limited by available wood (WOOD_PER_TOOL).
-    TOOLS_PER_WORKER: 0.35,     // tools/day per worker assigned to tools
-    WOOD_PER_TOOL: 0.75,        // wood cost per tool produced
-
-    // Tool productivity effects (shared pool):
-    // Tools boost output with diminishing returns based on "tools per pop".
-    // - If tools are scarce, multiplier is near 1.0
-    // - If tools are abundant, multiplier approaches (1 + max bonus)
-    TOOLS_TARGET_PER_POP: 1.0,  // "healthy" tools per person
-    TOOLS_MAX_OUTPUT_BONUS: 0.45, // +45% max bonus to production from tools
-    TOOLS_CURVE_SHARPNESS: 1.6, // >1 means slower early ramp, stronger later
-
-    // Tool decay:
-    // Tools wear out daily; higher workload slightly increases decay.
-    TOOLS_BASE_DECAY_RATE: 0.03, // 3% of tools/day baseline wear
-    TOOLS_WORKLOAD_DECAY_ADD: 0.01, // +1% if total workers ~pop (high utilization)
-    TOOLS_MIN_DECAY: 0.05,       // minimum absolute tools lost per day
   };
 
   // -------------------------------
   // State
   // -------------------------------
   const INITIAL = () => ({
+    // timeline
     day: 1,
-    mode: CONFIG.DEFAULT_MODE,
+    mode: CONFIG.DEFAULT_MODE, // "auto" or "manual"
     paused: false,
     gameOver: false,
 
+    // core resources
     pop: 30,
     food: 80,
     wood: 40,
     stability: 70,
 
-    // Workforce
+    // workforce
     workersFood: 10,
     workersWood: 5,
-    workersTools: 0, // new
 
-    // Buildings
+    // buildings
     farms: 0,
 
-    // Policies
+    // policies (timers)
     rationing: 0,
     feasting: 0,
 
-    // Tools (shared pool)
-    tools: 10, // starting stock (small)
-
-    // Events
+    // event
     activeEvent: null,
 
-    // Tick timer
+    // tick timer
     tickSpeedMs: CONFIG.DEFAULT_SPEED_MS,
   });
 
@@ -185,8 +149,11 @@
   }
 
   function applyTimeControl() {
+    // Manual mode means no interval ticks. Auto mode means interval, unless paused/game over.
     stopAutoTick();
+
     if (state.gameOver) return;
+
     if (state.mode === "auto" && !state.paused) startAutoTick();
   }
 
@@ -224,29 +191,15 @@
   // Core math
   // -------------------------------
   function farmBonusMult() {
-    return 1 + (state.farms * CONFIG.FARM_FOOD_MULT_PER_FARM);
-  }
-
-  // Tools multiplier: diminishing returns based on tools per pop
-  // ratio = tools / (pop * target)
-  // multiplier = 1 + maxBonus * (ratio^k / (1 + ratio^k))
-  function toolsOutputMult() {
-    const denom = Math.max(1, state.pop) * CONFIG.TOOLS_TARGET_PER_POP;
-    const ratio = state.tools / Math.max(1e-6, denom);
-    const k = CONFIG.TOOLS_CURVE_SHARPNESS;
-
-    const x = Math.pow(ratio, k);
-    const saturating = x / (1 + x);
-
-    return 1 + (CONFIG.TOOLS_MAX_OUTPUT_BONUS * saturating);
+    return 1 + state.farms * CONFIG.FARM_FOOD_MULT_PER_FARM;
   }
 
   function foodPerDay() {
-    return state.workersFood * CONFIG.FOOD_PER_WORKER * farmBonusMult() * toolsOutputMult();
+    return state.workersFood * CONFIG.FOOD_PER_WORKER * farmBonusMult();
   }
 
   function woodPerDay() {
-    return state.workersWood * CONFIG.WOOD_PER_WORKER * toolsOutputMult();
+    return state.workersWood * CONFIG.WOOD_PER_WORKER;
   }
 
   function foodConsumptionPerDay() {
@@ -257,83 +210,20 @@
   }
 
   function validateWorkforce() {
-    // Ensure total workers <= population. Clamp tools first, then wood, then food.
-    const total = state.workersFood + state.workersWood + state.workersTools;
+    // Ensure total workers <= population. Clamp wood first, then food.
+    const total = state.workersFood + state.workersWood;
     if (total <= state.pop) return;
 
     let overflow = total - state.pop;
 
-    // Reduce tools
-    if (state.workersTools >= overflow) {
-      state.workersTools -= overflow;
-      return;
-    }
-    overflow -= state.workersTools;
-    state.workersTools = 0;
-
-    // Reduce wood
     if (state.workersWood >= overflow) {
       state.workersWood -= overflow;
       return;
     }
+
     overflow -= state.workersWood;
     state.workersWood = 0;
-
-    // Reduce food
     state.workersFood = clamp(state.workersFood - overflow, 0, state.pop);
-  }
-
-  // -------------------------------
-  // Tools system
-  // -------------------------------
-  function toolsMadePerDayPotential() {
-    return state.workersTools * CONFIG.TOOLS_PER_WORKER;
-  }
-
-  function toolsWoodRequired(potentialTools) {
-    return potentialTools * CONFIG.WOOD_PER_TOOL;
-  }
-
-  function applyToolmaking() {
-    if (state.workersTools <= 0) return { made: 0, woodSpent: 0 };
-
-    const potential = toolsMadePerDayPotential();
-    if (potential <= 0) return { made: 0, woodSpent: 0 };
-
-    const woodNeeded = toolsWoodRequired(potential);
-
-    // If insufficient wood, scale down production
-    let scale = 1;
-    if (state.wood < woodNeeded) {
-      scale = state.wood / Math.max(1e-6, woodNeeded);
-    }
-
-    const made = potential * scale;
-    const woodSpent = woodNeeded * scale;
-
-    state.wood -= woodSpent;
-    state.tools += made;
-
-    // If we were wood-starved, log occasionally (not every day spam)
-    if (scale < 0.5 && Math.random() < 0.25) {
-      logLine("Toolmaking stalled due to low wood.", "warn");
-    }
-
-    return { made, woodSpent };
-  }
-
-  function applyToolDecay() {
-    // Wear depends on utilization: if total assigned workers ~ pop, tools wear faster.
-    const totalWorkers = state.workersFood + state.workersWood + state.workersTools;
-    const utilization = totalWorkers / Math.max(1, state.pop);
-
-    const add = utilization > 0.85 ? CONFIG.TOOLS_WORKLOAD_DECAY_ADD : 0;
-    const rate = CONFIG.TOOLS_BASE_DECAY_RATE + add;
-
-    const loss = Math.max(CONFIG.TOOLS_MIN_DECAY, state.tools * rate);
-    state.tools = clamp(state.tools - loss, 0, 999999);
-
-    return loss;
   }
 
   // -------------------------------
@@ -345,7 +235,7 @@
         return {
           key,
           title: "Wandering Traders Arrive",
-          body: "They offer goods for wood. You can also buy tools.",
+          body: "They offer food for wood. Fair deal, but your stores matter.",
           options: [
             {
               label: "Trade 20 wood → 35 food",
@@ -355,16 +245,6 @@
                 state.food += 35;
                 state.stability = clamp(state.stability + 2, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
                 logLine("You traded with the traders. Supplies improved.", "good");
-              },
-            },
-            {
-              label: "Trade 15 wood → 10 tools",
-              can: () => state.wood >= 15,
-              apply: () => {
-                state.wood -= 15;
-                state.tools += 10;
-                state.stability = clamp(state.stability + 1, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                logLine("You acquired tools from the traders.", "good");
               },
             },
             {
@@ -381,15 +261,14 @@
       case "THEFT":
         return {
           key,
-          title: "Theft at Night",
-          body: "Hungry citizens stole from stores—some tools went missing.",
+          title: "Food Theft at Night",
+          body: "Hungry citizens stole from stores. You must respond.",
           options: [
             {
               label: "Punish harshly (order now, risk death)",
               can: () => true,
               apply: () => {
                 state.stability = clamp(state.stability + 6, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                state.tools = clamp(state.tools - 2, 0, 999999);
                 if (Math.random() < 0.35) {
                   state.pop = clamp(state.pop - 1, 0, 999999);
                   logLine("Harsh punishment restored order—at a human cost.", "warn");
@@ -414,7 +293,7 @@
         return {
           key,
           title: "Public Riot",
-          body: "Crowds gather, angry and scared. Property (and tools) may be damaged.",
+          body: "Crowds gather, angry and scared. This can spiral.",
           options: [
             {
               label: "Spend 25 food to calm them",
@@ -431,12 +310,10 @@
               apply: () => {
                 state.stability = clamp(state.stability + 8, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
                 if (Math.random() < 0.5) {
-                  const lossWood = rndInt(5, 18);
-                  const lossTools = rndInt(1, 6);
-                  state.wood = clamp(state.wood - lossWood, 0, 999999);
-                  state.tools = clamp(state.tools - lossTools, 0, 999999);
+                  const loss = rndInt(5, 18);
+                  state.wood = clamp(state.wood - loss, 0, 999999);
                   state.stability = clamp(state.stability - 10, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                  logLine(`Force backfired: property damage (-${lossWood} wood, -${lossTools} tools).`, "bad");
+                  logLine(`Force backfired: property damage (-${loss} wood).`, "bad");
                 } else {
                   logLine("Force ended the riot quickly.", "warn");
                 }
@@ -490,7 +367,7 @@
   }
 
   // -------------------------------
-  // Player actions
+  // Actions (player-driven)
   // -------------------------------
   const actions = {
     workFood: () => {
@@ -555,7 +432,7 @@
   // -------------------------------
   function tick() {
     if (state.gameOver) return;
-    if (state.paused && state.mode === "auto") return;
+    if (state.paused && state.mode === "auto") return; // manual mode ignores pause
 
     validateWorkforce();
 
@@ -563,21 +440,15 @@
     if (state.rationing > 0) state.rationing -= 1;
     if (state.feasting > 0) state.feasting -= 1;
 
-    // Production (food + wood)
+    // Production
     const fp = foodPerDay();
     const wp = woodPerDay();
     state.food += fp;
     state.wood += wp;
 
-    // Toolmaking (converts wood -> tools using workersTools)
-    const tm = applyToolmaking();
-
     // Consumption
     const cons = foodConsumptionPerDay();
     state.food -= cons;
-
-    // Tool decay (wear)
-    const toolLoss = applyToolDecay();
 
     // Starvation effects
     if (state.food < 0) {
@@ -591,16 +462,22 @@
       );
       state.stability = clamp(state.stability - stabLoss, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
 
-      if (deficit > state.pop * CONFIG.STARVATION_DEATH_DEFICIT_RATIO && Math.random() < CONFIG.STARVATION_DEATH_CHANCE) {
+      if (
+        deficit > state.pop * CONFIG.STARVATION_DEATH_DEFICIT_RATIO &&
+        Math.random() < CONFIG.STARVATION_DEATH_CHANCE
+      ) {
         state.pop = clamp(state.pop - 1, 0, 999999);
         logLine("Starvation claimed a life.", "bad");
-      } elset {
+      } else {
         logLine("Food shortage hit stability hard.", "warn");
       }
     }
 
-    // Ambient stability drift
-    if (state.food > state.pop * CONFIG.STAB_DRIFT_UP_IF_WELL_FED_RATIO && state.stability < CONFIG.STAB_DRIFT_CAP) {
+    // Ambient drift
+    if (
+      state.food > state.pop * CONFIG.STAB_DRIFT_UP_IF_WELL_FED_RATIO &&
+      state.stability < CONFIG.STAB_DRIFT_CAP
+    ) {
       state.stability = clamp(state.stability + CONFIG.STAB_DRIFT_UP, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
     }
     if (state.stability > CONFIG.STAB_TOO_HIGH) {
@@ -615,17 +492,9 @@
     if (state.stability <= 0) return endGame("Authority collapsed.");
 
     // Win condition
-    if (state.day >= CONFIG.WIN_DAY) return endGame(`You survived ${CONFIG.WIN_DAY} days. MPL-B complete.`, true);
+    if (state.day >= CONFIG.WIN_DAY) return endGame(`You survived ${CONFIG.WIN_DAY} days. MPL complete.`, true);
 
-    // Occasional tool economy log (not spam)
-    if ((state.day % 7) === 0) {
-      const mult = toolsOutputMult();
-      logLine(
-        `Tools report: ${Math.floor(state.tools)} tools, wear -${toolLoss.toFixed(1)}/day, output x${mult.toFixed(2)}.`,
-        "warn"
-      );
-    }
-
+    // Advance time
     state.day += 1;
     render();
   }
@@ -633,8 +502,8 @@
   function endGame(reason, win = false) {
     state.gameOver = true;
     logLine(reason, win ? "good" : "bad");
-    applyTimeControl();
-    render();
+    applyTimeControl(); // ensure timer stops
+    render(); // refresh badge
   }
 
   // -------------------------------
@@ -673,7 +542,6 @@
   }
 
   function syncWorkforceUItoState() {
-    // Existing sliders
     if (ui.wfFood) {
       ui.wfFood.max = String(state.pop);
       ui.wfFood.value = String(state.workersFood);
@@ -685,13 +553,6 @@
       ui.wfWood.value = String(state.workersWood);
       if (ui.wfWoodVal) ui.wfWoodVal.textContent = String(state.workersWood);
     }
-
-    // Optional tools slider
-    if (ui.wfTools) {
-      ui.wfTools.max = String(state.pop);
-      ui.wfTools.value = String(state.workersTools);
-      if (ui.wfToolsVal) ui.wfToolsVal.textContent = String(state.workersTools);
-    }
   }
 
   function render() {
@@ -701,10 +562,7 @@
 
     if (ui.statusBadge) {
       ui.statusBadge.textContent = s.text;
-      const color =
-        s.tone === "good" ? "var(--good)" :
-        s.tone === "warn" ? "var(--warn)" :
-        "var(--bad)";
+      const color = s.tone === "good" ? "var(--good)" : s.tone === "warn" ? "var(--warn)" : "var(--bad)";
       ui.statusBadge.style.color = color;
       ui.statusBadge.style.borderColor = color;
     }
@@ -713,33 +571,27 @@
     if (ui.food) ui.food.textContent = fmtInt(state.food);
     if (ui.wood) ui.wood.textContent = fmtInt(state.wood);
     if (ui.stab) ui.stab.textContent = `${fmtInt(state.stability)} / ${CONFIG.STAB_MAX}`;
-
     if (ui.farms) ui.farms.textContent = fmtInt(state.farms);
-    if (ui.tools) ui.tools.textContent = fmtInt(state.tools);
 
-    // Rates line
     if (ui.rates) {
       const fp = foodPerDay();
       const wp = woodPerDay();
       const cons = foodConsumptionPerDay();
-      const mult = toolsOutputMult();
-
-      const potentialTools = toolsMadePerDayPotential();
-      const woodNeed = toolsWoodRequired(potentialTools);
 
       const pol = [
         state.rationing > 0 ? `Rationing(${state.rationing}d)` : null,
         state.feasting > 0 ? `Feast(${state.feasting}d)` : null,
-      ].filter(Boolean).join(" ");
+      ]
+        .filter(Boolean)
+        .join(" ");
 
       ui.rates.textContent =
         `Rates: +${fp.toFixed(1)} food/day, +${wp.toFixed(1)} wood/day, -${cons.toFixed(1)} food/day consumption. ` +
-        `Tools: x${mult.toFixed(2)} output; make ~${potentialTools.toFixed(2)}/day (needs ${woodNeed.toFixed(1)} wood/day). ` +
         `Mode: ${state.mode}${state.mode === "auto" ? ` @ ${Math.round(state.tickSpeedMs / 1000)}s/day` : ""}. ` +
         `Policies: ${pol || "none"}.`;
     }
 
-    // Disable action buttons based on feasibility
+    // Disable/enable action buttons
     document.querySelectorAll("button[data-action]").forEach((btn) => {
       const key = btn.getAttribute("data-action");
       const over = state.gameOver;
@@ -749,7 +601,7 @@
       else btn.disabled = over;
     });
 
-    // Toggle tick label
+    // Update toggle tick label
     if (ui.toggleTick) {
       if (state.mode === "manual") ui.toggleTick.textContent = "Manual Mode";
       else ui.toggleTick.textContent = state.paused ? "Resume" : "Pause";
@@ -765,7 +617,7 @@
   }
 
   // -------------------------------
-  // Wiring: sliders + time controls + reset
+  // Wiring: UI controls
   // -------------------------------
   function wireWorkforceSliders() {
     if (ui.wfFood) {
@@ -785,18 +637,12 @@
         render();
       });
     }
-
-    if (ui.wfTools) {
-      ui.wfTools.addEventListener("input", () => {
-        state.workersTools = Number(ui.wfTools.value);
-        validateWorkforce();
-        syncWorkforceUItoState();
-        render();
-      });
-    }
   }
 
   function wireTimeControls() {
+    // ToggleTick behavior:
+    // - If manual mode: toggles to auto mode and starts ticking (default speed).
+    // - If auto mode: toggles pause/resume.
     if (ui.toggleTick) {
       ui.toggleTick.addEventListener("click", () => {
         if (state.gameOver) return;
@@ -815,6 +661,7 @@
       });
     }
 
+    // Manual End Day
     if (ui.endDay) {
       ui.endDay.addEventListener("click", () => {
         if (state.gameOver) return;
@@ -822,6 +669,7 @@
       });
     }
 
+    // Optional speed buttons: any element with data-speed="ms"
     document.querySelectorAll("[data-speed]").forEach((btn) => {
       btn.addEventListener("click", () => {
         if (state.gameOver) return;
@@ -831,6 +679,7 @@
 
         state.tickSpeedMs = ms;
 
+        // If currently manual, switch to auto so speed matters
         if (state.mode !== "auto") {
           state.mode = "auto";
           state.paused = false;
@@ -852,7 +701,7 @@
       state = INITIAL();
 
       if (ui.log) ui.log.innerHTML = "";
-      logLine("New run started (MPL-B Tools).", "");
+      logLine("New run started.", "");
 
       renderEvent();
       render();
@@ -861,6 +710,7 @@
   }
 
   function wireModeHotkey() {
+    // Press "M" to toggle manual/auto (handy while designing)
     window.addEventListener("keydown", (e) => {
       if (e.key.toLowerCase() !== "m") return;
       if (state.gameOver) return;
@@ -884,7 +734,7 @@
     wireReset();
     wireModeHotkey();
 
-    logLine("New run started (MPL-B Tools).", "");
+    logLine("New run started.", "");
     renderEvent();
     render();
     applyTimeControl();
@@ -892,4 +742,3 @@
 
   boot();
 })();
-
