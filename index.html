@@ -23,7 +23,9 @@
           <div class="stat"><label>Population</label><div id="pop"></div></div>
           <div class="stat"><label>Food</label><div id="food"></div></div>
           <div class="stat"><label>Wood</label><div id="wood"></div></div>
+          <div class="stat"><label>Tools</label><div id="tools"></div></div>
           <div class="stat"><label>Stability</label><div id="stab"></div></div>
+          <div class="stat"><label>Farms</label><div id="farms"></div></div>
         </div>
         <div class="note" id="rates"></div>
       </section>
@@ -41,16 +43,25 @@
         <div class="split">
           <div>
             <h3>Workforce</h3>
+
             <div class="row">
               <label>Workers on Food</label>
               <input id="wfFood" type="range" min="0" max="50" value="10" />
               <span id="wfFoodVal"></span>
             </div>
+
             <div class="row">
               <label>Workers on Wood</label>
               <input id="wfWood" type="range" min="0" max="50" value="5" />
               <span id="wfWoodVal"></span>
             </div>
+
+            <div class="row">
+              <label>Workers on Tools</label>
+              <input id="wfTools" type="range" min="0" max="50" value="0" />
+              <span id="wfToolsVal"></span>
+            </div>
+
             <div class="hint">Keep total workers ≤ population.</div>
           </div>
 
@@ -59,6 +70,7 @@
             <div class="stats">
               <div class="stat"><label>Farms</label><div id="farms"></div></div>
             </div>
+            <div class="hint">Farms boost food output. Tools boost all output but decay over time.</div>
           </div>
         </div>
       </section>
@@ -77,12 +89,11 @@
       </section>
     </main>
 
-   <footer class="footer">
-  <button id="endDay">End Day</button>
-  <button id="toggleTick">Pause</button>
-  <button id="reset">Reset Run</button>
-</footer>
-
+    <footer class="footer">
+      <button id="endDay">End Day</button>
+      <button id="toggleTick">Pause</button>
+      <button id="reset">Reset Run</button>
+    </footer>
   </div>
 
   <script src="game.js"></script>
