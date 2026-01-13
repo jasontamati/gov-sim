@@ -14,18 +14,22 @@
 
   --shadow: rgba(0,0,0,0.45);
   --glow: rgba(120,140,255,0.22);
+  --glow2: rgba(55,214,122,0.14);
 
   --radius: 18px;
 
-  /* Dashboard sizing */
+  /* Layout sizing */
   --gap: 14px;
   --cardPad: 14px;
+  --logMaxH: 380px;
 
-  /* Log height targets */
-  --logMaxH: 340px;
+  /* Focus */
+  --focus: rgba(120,140,255,0.65);
 }
 
 *{ box-sizing:border-box; }
+
+html, body{ height:100%; }
 
 body{
   margin:0;
@@ -38,10 +42,11 @@ body{
     linear-gradient(180deg, var(--bg2) 0%, var(--bg1) 45%, var(--bg0) 100%);
 }
 
-/* Soft grid overlay (no images) */
+/* Soft grid overlay */
 body::before{
   content:"";
-  position:fixed; inset:0;
+  position:fixed;
+  inset:0;
   pointer-events:none;
   background:
     repeating-linear-gradient(
@@ -70,6 +75,21 @@ body::before{
   z-index:1;
 }
 
+/* ---------- Icons ---------- */
+.icon,
+.material-symbols-rounded{
+  font-family: "Material Symbols Rounded";
+  font-weight: 600;
+  font-style: normal;
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  vertical-align: -3px;
+  margin-right: 8px;
+  color: rgba(234,240,255,0.78);
+  font-variation-settings: "FILL" 0, "wght" 600, "GRAD" 0, "opsz" 24;
+}
+
 /* ---------- Topbar ---------- */
 .topbar{
   border: 1px solid var(--line);
@@ -92,6 +112,13 @@ body::before{
   justify-content:space-between;
   gap:12px;
   flex-wrap:wrap;
+}
+
+.title{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  min-width: 280px;
 }
 
 h1{
@@ -120,43 +147,93 @@ h1{
   letter-spacing: 0.2px;
 }
 
-/* ---------- Icons ---------- */
-/* Your existing .icon works, but add the official class as fallback */
-.icon,
-.material-symbols-rounded{
-  font-family: "Material Symbols Rounded";
-  font-weight: 600;
-  font-style: normal;
-  font-size: 18px;
-  line-height: 1;
-  display: inline-flex;
-  vertical-align: -3px;
-  margin-right: 8px;
-  color: rgba(234,240,255,0.78);
-  font-variation-settings: "FILL" 0, "wght" 600, "GRAD" 0, "opsz" 24;
+.badge-muted{
+  opacity: 0.88;
 }
 
-/* ---------- Dashboard grid ---------- */
-/* Replace stacked scrolling with a dashboard layout */
-.stack{
+/* Top controls */
+.topControls{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+}
+
+/* unify top buttons without overriding generic button styles */
+.btnTop, .btnSpeed{
+  cursor:pointer;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.08);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 14px;
+  font-weight: 900;
+  letter-spacing: 0.15px;
+  display:inline-flex;
+  align-items:center;
+
+  box-shadow:
+    0 12px 26px rgba(0,0,0,0.32),
+    0 0 0 1px rgba(255,255,255,0.03) inset;
+
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.btnTop:hover, .btnSpeed:hover{
+  border-color: rgba(255,255,255,0.22);
+  background: rgba(255,255,255,0.12);
+  box-shadow:
+    0 16px 34px rgba(0,0,0,0.38),
+    0 0 0 1px rgba(255,255,255,0.05) inset,
+    0 0 26px rgba(120,140,255,0.18);
+}
+
+.btnTop:active, .btnSpeed:active{ transform: translateY(1px); }
+
+.btnTop:disabled, .btnSpeed:disabled{
+  opacity: 0.5;
+  cursor:not-allowed;
+  transform:none;
+  box-shadow:none;
+}
+
+.btnTop:focus-visible, .btnSpeed:focus-visible{
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.speeds{
+  display:inline-flex;
+  gap: 8px;
+  align-items:center;
+  padding-left: 10px;
+  margin-left: 4px;
+  border-left: 1px solid rgba(255,255,255,0.12);
+}
+
+.btnSpeed{
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+/* ---------- Main Grid ---------- */
+.grid{
   margin-top: var(--gap);
   display:grid;
-  grid-template-columns: 1.2fr 1fr;              /* left: primary, right: controls */
+  grid-template-columns: 1.15fr 0.85fr; /* left: state, right: event */
   grid-template-areas:
-    "state   actions"
-    "event   workforce"
-    "log     buildings";
+    "state   event"
+    "controls controls"
+    "log     log";
   gap: var(--gap);
   align-items:start;
 }
 
-/* Ensure your existing section classes map nicely */
 .card-state{ grid-area: state; }
-.card-actions{ grid-area: actions; }
 .card-event{ grid-area: event; }
-.card-workforce{ grid-area: workforce; }
+.card-controls{ grid-area: controls; }
 .card-log{ grid-area: log; }
-.card-buildings{ grid-area: buildings; }
 
 /* ---------- Cards ---------- */
 .card{
@@ -172,14 +249,15 @@ h1{
     0 18px 50px var(--shadow),
     0 0 0 1px rgba(255,255,255,0.04) inset,
     0 0 36px rgba(120,140,255,0.12);
+
   position:relative;
   overflow:hidden;
 }
 
-/* Edge highlight */
 .card::before{
   content:"";
-  position:absolute; inset:-2px;
+  position:absolute;
+  inset:-2px;
   pointer-events:none;
   background:
     radial-gradient(600px 220px at 20% 0%, rgba(255,255,255,0.16), rgba(255,255,255,0) 60%),
@@ -192,6 +270,8 @@ h1{
   align-items:center;
   justify-content:space-between;
   gap:10px;
+  position:relative;
+  z-index:1;
 }
 
 .card h2{
@@ -200,26 +280,29 @@ h1{
   color: rgba(234,240,255,0.78);
   font-weight: 800;
   letter-spacing: 0.3px;
-  position:relative;
-  z-index:1;
 }
 
 .card h3{
-  margin: 12px 0 8px;
+  margin: 0 0 10px;
   font-size: 13px;
   color: rgba(234,240,255,0.72);
   font-weight: 800;
+}
+
+/* ---------- Stats / KPIs ---------- */
+.stats{
+  display:grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
   position:relative;
   z-index:1;
 }
 
-/* ---------- Stats ---------- */
-.stats{
-  display:grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)); /* show more at a glance */
-  gap: 10px;
-  position:relative;
-  z-index:1;
+.kpis{ margin-top: 2px; }
+
+.kpis-pressures{
+  margin-top: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .stat{
@@ -238,9 +321,12 @@ h1{
   color: rgba(234,240,255,0.68);
   margin-bottom: 6px;
   letter-spacing: 0.25px;
+  white-space: nowrap;
+  overflow:hidden;
+  text-overflow: ellipsis;
 }
 
-.stat div{
+.stat > div{
   font-size: 22px;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
@@ -248,8 +334,7 @@ h1{
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-/* ---------- Rates UI (NEW) ---------- */
-/* Supports the JS “net-first” layout */
+/* ---------- Notes / Rates ---------- */
 .note{
   margin-top: 10px;
   font-size: 12px;
@@ -284,17 +369,14 @@ h1{
 .pill.good{
   border-color: rgba(55,214,122,0.35);
   background: rgba(55,214,122,0.10);
-  color: rgba(234,240,255,0.90);
 }
 .pill.bad{
   border-color: rgba(255,90,95,0.40);
   background: rgba(255,90,95,0.10);
-  color: rgba(234,240,255,0.92);
 }
 .pill.warn{
   border-color: rgba(255,191,60,0.40);
   background: rgba(255,191,60,0.10);
-  color: rgba(234,240,255,0.90);
 }
 
 .ratesBottom{
@@ -302,13 +384,36 @@ h1{
   line-height: 1.35;
 }
 
-/* ---------- Buttons / Actions ---------- */
+/* ---------- Control Panel layout ---------- */
+.controlGrid{
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  position:relative;
+  z-index:1;
+}
+
+.panel{
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(0,0,0,0.16);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+}
+
+.panel-wide{
+  grid-column: 1 / -1;
+}
+
+.panel h3{
+  margin: 0 0 10px;
+}
+
+/* Buttons inside panels */
 .actions{
   display:grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  position:relative;
-  z-index:1;
 }
 
 button{
@@ -320,6 +425,8 @@ button{
   border-radius: 14px;
   font-weight: 900;
   letter-spacing: 0.15px;
+  display:inline-flex;
+  align-items:center;
 
   box-shadow:
     0 12px 26px rgba(0,0,0,0.32),
@@ -347,10 +454,11 @@ button:disabled{
 }
 
 button:focus-visible{
-  outline: 2px solid rgba(120,140,255,0.65);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
+/* Decision accents */
 button[data-action="buildFarm"]{ border-color: rgba(255,191,60,0.40); }
 button[data-action="ration"]{ border-color: rgba(255,90,95,0.42); }
 button[data-action="feast"]{ border-color: rgba(55,214,122,0.40); }
@@ -358,12 +466,10 @@ button[data-action="feast"]{ border-color: rgba(55,214,122,0.40); }
 /* ---------- Workforce rows ---------- */
 .row{
   display:grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(160px, 0.9fr) 1.4fr auto;
   gap: 10px;
   align-items:center;
   margin: 10px 0;
-  position:relative;
-  z-index:1;
 }
 
 .row label{
@@ -388,21 +494,19 @@ input[type="range"]{
   accent-color: rgba(120,140,255,0.85);
 }
 
+/* ---------- Hints ---------- */
 .hint{
   font-size: 12px;
   color: rgba(234,240,255,0.65);
   margin-top: 8px;
   line-height: 1.3;
-  position:relative;
-  z-index:1;
 }
 
-/* ---------- Event ---------- */
+/* ---------- Event box ---------- */
 .event{
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 14px;
   padding: 12px;
-
   background: rgba(0,0,0,0.18);
   box-shadow:
     0 12px 28px rgba(0,0,0,0.30),
@@ -437,17 +541,15 @@ input[type="range"]{
   border-radius: 12px;
 }
 
-/* ---------- Log (make ONLY log scroll) ---------- */
+/* ---------- Log ---------- */
 .log{
   max-height: var(--logMaxH);
   overflow:auto;
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 14px;
   padding: 10px;
-
   background: rgba(0,0,0,0.22);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
-
   font-size: 12px;
   color: rgba(234,240,255,0.70);
   position:relative;
@@ -459,55 +561,35 @@ input[type="range"]{
 .log .bad{  color: var(--bad);  font-weight: 800; }
 .log .warn{ color: var(--warn); font-weight: 800; }
 
-/* ---------- Footer + Speeds ---------- */
-.footer{
-  margin-top: var(--gap);
-  display:flex;
-  gap: 10px;
-  justify-content:flex-end;
-  flex-wrap:wrap;
-  align-items:center;
-}
-
-.speeds{
-  display:inline-flex;
-  gap: 8px;
-  align-items:center;
-  padding-left: 10px;
-  margin-left: 4px;
-  border-left: 1px solid rgba(255,255,255,0.12);
-}
-
-.speeds button{
-  padding: 8px 10px;
-  border-radius: 12px;
-}
-
 /* ---------- Responsive ---------- */
 @media (max-width: 980px){
-  .stack{
+  .grid{
     grid-template-columns: 1fr;
     grid-template-areas:
       "state"
-      "actions"
-      "workforce"
       "event"
-      "buildings"
+      "controls"
       "log";
   }
   .stats{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpis-pressures{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .controlGrid{ grid-template-columns: 1fr; }
+  .panel-wide{ grid-column: auto; }
+  .speeds{ border-left:none; padding-left:0; margin-left:0; }
 }
 
 @media (max-width: 520px){
   .actions{ grid-template-columns: 1fr; }
   .stats{ grid-template-columns: 1fr; }
+  .kpis-pressures{ grid-template-columns: 1fr; }
   .row{ grid-template-columns: 1fr; }
   .row span{ text-align:left; }
   .meta{ justify-content:flex-start; }
-  .speeds{ border-left:none; padding-left:0; margin-left:0; width:100%; justify-content:flex-end; }
+  .topControls{ justify-content:flex-start; }
+  .speeds{ width:100%; justify-content:flex-end; }
 }
 
-/* ---------- Fallback for browsers without backdrop-filter ---------- */
+/* ---------- Backdrop filter fallback ---------- */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))){
   .topbar, .card{ background: rgba(18,24,40,0.85); }
 }
