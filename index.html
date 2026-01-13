@@ -1,4 +1,3 @@
-```html
 <!doctype html>
 <html lang="en">
 <head>
@@ -36,18 +35,19 @@
       <section class="card">
         <h2>Actions</h2>
 
-        <!-- Quick presets (replaces ambiguous "Assign Workers" buttons) -->
+        <!-- Workforce presets -->
         <div class="actions">
-          <button data-preset="maxFood">Preset: Max Food</button>
-          <button data-preset="maxWood">Preset: Max Wood</button>
-          <button data-preset="balanced">Preset: Balanced</button>
-          <button data-preset="survival">Preset: Survival</button>
+          <button type="button" data-preset="maxFood">Preset: Max Food</button>
+          <button type="button" data-preset="maxWood">Preset: Max Wood</button>
+          <button type="button" data-preset="balanced">Preset: Balanced</button>
+          <button type="button" data-preset="survival">Preset: Survival</button>
         </div>
 
+        <!-- Core actions -->
         <div class="actions">
-          <button data-action="buildFarm">Build Farm (wood)</button>
-          <button data-action="ration">Ration (save food, lose stability)</button>
-          <button data-action="feast">Feast (cost food, gain stability)</button>
+          <button type="button" data-action="buildFarm">Build Farm (wood)</button>
+          <button type="button" data-action="ration">Ration (save food, lose stability)</button>
+          <button type="button" data-action="feast">Feast (cost food, gain stability)</button>
         </div>
 
         <div class="split">
@@ -57,19 +57,19 @@
             <div class="row">
               <label for="wfFood">Workers on Food</label>
               <input id="wfFood" type="range" min="0" max="50" value="10" />
-              <span id="wfFoodVal"></span>
+              <span id="wfFoodVal">10</span>
             </div>
 
             <div class="row">
               <label for="wfWood">Workers on Wood</label>
               <input id="wfWood" type="range" min="0" max="50" value="5" />
-              <span id="wfWoodVal"></span>
+              <span id="wfWoodVal">5</span>
             </div>
 
             <div class="row">
               <label for="wfTools">Workers on Tools</label>
               <input id="wfTools" type="range" min="0" max="50" value="0" />
-              <span id="wfToolsVal"></span>
+              <span id="wfToolsVal">0</span>
             </div>
 
             <div class="hint">Keep total workers ≤ population.</div>
@@ -88,6 +88,7 @@
       <!-- EVENT -->
       <section class="card">
         <h2>Event</h2>
+        <!-- Note: #eventActions exists for styling, but game.js renders event buttons inside eventBox dynamically -->
         <div id="eventBox" class="event empty">
           <div class="event-title">No active event</div>
           <div class="event-body">Keep the settlement alive.</div>
@@ -98,20 +99,20 @@
       <!-- LOG -->
       <section class="card">
         <h2>Log</h2>
-        <div id="log" class="log"></div>
+        <div id="log" class="log" aria-live="polite"></div>
       </section>
     </main>
 
     <footer class="footer">
-      <button id="endDay">End Day</button>
-      <button id="toggleTick">Pause</button>
-      <button id="reset">Reset Run</button>
+      <button type="button" id="endDay">End Day</button>
+      <button type="button" id="toggleTick">Pause</button>
+      <button type="button" id="reset">Reset Run</button>
 
-      <!-- Optional speed buttons (supported by your JS if present) -->
-      <div class="speeds">
-        <button data-speed="10000">1×</button>
-        <button data-speed="5000">2×</button>
-        <button data-speed="2500">4×</button>
+      <!-- Speed controls -->
+      <div class="speeds" aria-label="Speed controls">
+        <button type="button" data-speed="10000" aria-label="1x speed">1×</button>
+        <button type="button" data-speed="5000" aria-label="2x speed">2×</button>
+        <button type="button" data-speed="2500" aria-label="4x speed">4×</button>
       </div>
     </footer>
   </div>
@@ -119,4 +120,3 @@
   <script src="game.js"></script>
 </body>
 </html>
-```

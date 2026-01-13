@@ -1,11 +1,15 @@
 // Governance MPL - deterministic loop + manual/auto time + declarative events
-// Updates in this version:
-// - Adds Tools as a real system: workforce -> tools production, tools decay, tools boost output
-// - Adds wfTools slider support (wfTools, wfToolsVal) + tools stat rendering
-// - Fixes duplicate farms display: supports farms (state) + farmsBld (buildings panel)
-// - Adds workforce clamping that prioritizes the slider the user changed (no "slider fight")
-// - Adds preset buttons (data-preset): maxFood, maxWood, balanced, survival
-// - Keeps tick() deterministic (no UI reads inside tick), actions mutate state, render is pure-ish
+// Version upgrades in this rewrite:
+// - Tools is a real system: workforce -> tools production, tools decay, tools boost output
+// - wfTools slider support + tools stat rendering
+// - farms duplicate display supported: #farms (state) + #farmsBld (buildings panel)
+// - Workforce clamping prioritizes the slider the user changed (no "slider fight")
+// - Preset buttons (data-preset): maxFood, maxWood, balanced, survival
+// - Starvation model upgraded to A + B + C:
+//     A) proportional deaths based on deficit (unfed people)
+//     B) escalating penalties via consecutive hungry days (starveDays)
+//     C) hard fail after STARVE_DAYS_GAMEOVER consecutive hungry days
+// - tick() remains deterministic in structure (no DOM reads), actions mutate state, render presents state
 
 (() => {
   "use strict";
@@ -28,7 +32,6 @@
     farmsBld: $("farmsBld"),
     log: $("log"),
     eventBox: $("eventBox"),
-    eventActions: $("eventActions"),
 
     toggleTick: $("toggleTick"),
     reset: $("reset"),
@@ -79,12 +82,17 @@
     STAB_MAX: 100,
     STAB_MIN: 0,
 
-    // Starvation penalties
+    // Starvation penalties (baseline)
     STARVATION_STAB_LOSS_MULT: 0.15, // per missing food unit
     STARVATION_STAB_LOSS_MIN: 2,
     STARVATION_STAB_LOSS_MAX: 18,
-    STARVATION_DEATH_DEFICIT_RATIO: 0.8, // deficit > pop*ratio can kill
-    STARVATION_DEATH_CHANCE: 0.5,
+    STARVATION_DEATH_DEFICIT_RATIO: 0.8, // only lethal if deficit is "serious" vs pop
+
+    // Starvation escalation + collapse (A + B + C)
+    STARVE_DAYS_GAMEOVER: 15, // C: hard fail after 15 consecutive hungry days
+    STARVE_STAB_MULT_PER_DAY: 0.08, // B: +8% stab loss per hungry day
+    STARVE_DEATH_MULT_PER_DAY: 0.05, // B: +5% deaths per hungry day
+    STARVE_DEATH_MAX_PER_DAY_RATIO: 0.35, // cap deaths/day to avoid instant wipeouts
 
     // Ambient stability drift
     STAB_DRIFT_UP_IF_WELL_FED_RATIO: 3, // food > pop*ratio => drift up
@@ -140,6 +148,9 @@
     // policies (timers)
     rationing: 0,
     feasting: 0,
+
+    // hunger memory
+    starveDays: 0,
 
     // event
     activeEvent: null,
@@ -241,7 +252,7 @@
 
   // Workforce clamping:
   // - Guarantee total workers <= population.
-  // - Priority: keep the slider the user changed, clamp the others in a stable order.
+  // - Priority: keep the slider the user changed, clamp the others first.
   function validateWorkforce(priorityKey = null) {
     const keys = ["workersFood", "workersWood", "workersTools"];
 
@@ -253,11 +264,10 @@
 
     let overflow = total - state.pop;
 
-    // Choose clamp order: clamp non-priority first
     const clampOrder = keys.slice();
     if (priorityKey && clampOrder.includes(priorityKey)) {
       clampOrder.splice(clampOrder.indexOf(priorityKey), 1);
-      clampOrder.push(priorityKey); // priority last (i.e., clamp it only if needed)
+      clampOrder.push(priorityKey); // clamp priority last
     }
 
     for (const k of clampOrder) {
@@ -278,33 +288,24 @@
 
     const pop = state.pop;
 
-    // Allocate by ratios, then correct rounding error by topping up largest bucket (food-first feel)
     let f = Math.floor(pop * preset.food);
     let w = Math.floor(pop * preset.wood);
     let t = Math.floor(pop * preset.tools);
 
-    // Ensure non-negative
     f = Math.max(0, f);
     w = Math.max(0, w);
     t = Math.max(0, t);
 
-    // Fix rounding to exactly pop
+    // Round to exactly pop with a deliberate priority order.
     let used = f + w + t;
     while (used < pop) {
-      // Add remaining workers in a deliberate priority order: food > wood > tools
-      f += 1;
-      used += 1;
+      f += 1; used += 1;
       if (used >= pop) break;
-
-      w += 1;
-      used += 1;
+      w += 1; used += 1;
       if (used >= pop) break;
-
-      t += 1;
-      used += 1;
+      t += 1; used += 1;
     }
     while (used > pop) {
-      // Remove extras in reverse order: tools > wood > food
       if (t > 0) t -= 1;
       else if (w > 0) w -= 1;
       else if (f > 0) f -= 1;
@@ -358,7 +359,7 @@
           body: "Hungry citizens stole from stores. You must respond.",
           options: [
             {
-              label: "Punish harshly (order now, risk death)",
+              label: "Punish harshly (order now, risk deaths)",
               can: () => true,
               apply: () => {
                 state.stability = clamp(state.stability + 6, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
@@ -542,33 +543,62 @@
     state.wood += wp;
     state.tools += tp;
 
-    // Tools decay (wear/maintenance)
+    // Tools decay
     state.tools = clamp(state.tools - toolsDecayPerDay(), 0, 999999);
 
     // Consumption
     const cons = foodConsumptionPerDay();
     state.food -= cons;
 
-    // Starvation effects
+    // ---------------------------
+    // Starvation (A + B + C)
+    // ---------------------------
+    let deficit = 0;
     if (state.food < 0) {
-      const deficit = Math.abs(state.food);
+      deficit = Math.abs(state.food);
       state.food = 0;
+    }
 
-      const stabLoss = clamp(
+    // Hunger memory
+    if (deficit > 0) state.starveDays += 1;
+    else state.starveDays = 0;
+
+    if (deficit > 0) {
+      const stabMult = 1 + state.starveDays * CONFIG.STARVE_STAB_MULT_PER_DAY;
+      const deathMult = 1 + state.starveDays * CONFIG.STARVE_DEATH_MULT_PER_DAY;
+
+      // Stability loss (escalates)
+      const baseStabLoss = clamp(
         deficit * CONFIG.STARVATION_STAB_LOSS_MULT,
+        CONFIG.STARVATION_STAB_LOSS_MIN,
+        CONFIG.STARVATION_STAB_LOSS_MAX
+      );
+      const stabLoss = clamp(
+        baseStabLoss * stabMult,
         CONFIG.STARVATION_STAB_LOSS_MIN,
         CONFIG.STARVATION_STAB_LOSS_MAX
       );
       state.stability = clamp(state.stability - stabLoss, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
 
-      if (
-        deficit > state.pop * CONFIG.STARVATION_DEATH_DEFICIT_RATIO &&
-        Math.random() < CONFIG.STARVATION_DEATH_CHANCE
-      ) {
-        state.pop = clamp(state.pop - 1, 0, 999999);
-        logLine("Starvation claimed a life.", "bad");
+      // A: proportional deaths based on unfed people
+      const unfed = Math.ceil(deficit / CONFIG.FOOD_CONSUMPTION_PER_POP);
+
+      // Scale with streak, cap per day to keep gameplay readable
+      const rawDeaths = Math.floor(unfed * deathMult);
+      const maxDeaths = Math.max(1, Math.floor(state.pop * CONFIG.STARVE_DEATH_MAX_PER_DAY_RATIO));
+      const deaths = clamp(rawDeaths, 1, maxDeaths);
+
+      // Only lethal if deficit is serious relative to pop
+      if (deficit > state.pop * CONFIG.STARVATION_DEATH_DEFICIT_RATIO) {
+        state.pop = clamp(state.pop - deaths, 0, 999999);
+        logLine(`Starvation killed ${deaths} people. (streak: ${state.starveDays}d)`, "bad");
       } else {
-        logLine("Food shortage hit stability hard.", "warn");
+        logLine(`Food shortage reduced stability. (streak: ${state.starveDays}d)`, "warn");
+      }
+
+      // C: hard fail if famine lasts too long
+      if (state.starveDays >= CONFIG.STARVE_DAYS_GAMEOVER) {
+        return endGame(`Famine collapse: ${state.starveDays} consecutive hungry days.`);
       }
     }
 
@@ -617,15 +647,11 @@
       ui.eventBox.innerHTML = `
         <div class="event-title">No active event</div>
         <div class="event-body">Keep the settlement alive.</div>
-        <div class="event-actions" id="eventActions"></div>
       `;
-      // refresh reference (because we replaced innerHTML)
-      ui.eventActions = $("eventActions");
       return;
     }
 
     ui.eventBox.className = "event";
-
     const actionsHtml = (ev.options || [])
       .map((opt, idx) => {
         const disabled = opt.can() ? "" : "disabled";
@@ -636,10 +662,8 @@
     ui.eventBox.innerHTML = `
       <div class="event-title">${ev.title}</div>
       <div class="event-body">${ev.body}</div>
-      <div class="event-actions" id="eventActions">${actionsHtml}</div>
+      <div class="event-actions">${actionsHtml}</div>
     `;
-
-    ui.eventActions = $("eventActions");
 
     ui.eventBox.querySelectorAll("button[data-ev]").forEach((b) => {
       b.addEventListener("click", () => resolveEvent(Number(b.getAttribute("data-ev"))));
@@ -704,12 +728,15 @@
         .filter(Boolean)
         .join(" ");
 
+      const hunger = state.starveDays > 0 ? ` HungerStreak(${state.starveDays}d).` : "";
+
       ui.rates.textContent =
         `Rates: +${fp.toFixed(1)} food/day, +${wp.toFixed(1)} wood/day, +${tp.toFixed(1)} tools/day, ` +
         `-${cons.toFixed(1)} food/day consumption. ` +
         `Tools: ×${toolMult.toFixed(2)} output, -${decay.toFixed(1)}/day decay. ` +
         `Mode: ${state.mode}${state.mode === "auto" ? ` @ ${Math.round(state.tickSpeedMs / 1000)}s/day` : ""}. ` +
-        `Policies: ${pol || "none"}.`;
+        `Policies: ${pol || "none"}.` +
+        hunger;
     }
 
     // Disable/enable action buttons
