@@ -12,30 +12,51 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@600;800&display=swap" rel="stylesheet">
 
   <!-- Material Symbols (free icons) -->
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400..700,0..1,-50..200" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,500..700,0..1,-50..200" rel="stylesheet">
 </head>
 <body>
   <div class="app">
     <header class="topbar">
       <div class="brand">
-        <h1>Governance MPL</h1>
-        <div class="meta">
-          <span id="day"></span>
-          <span id="statusBadge" class="badge"></span>
+        <div class="title">
+          <h1>Governance MPL</h1>
+          <div class="meta">
+            <span id="day"></span>
+            <span id="statusBadge" class="badge"></span>
+          </div>
+        </div>
+
+        <!-- Time controls moved to header so the "flow controls" are always visible -->
+        <div class="topControls">
+          <button type="button" id="endDay" class="btnTop">
+            <span class="icon">skip_next</span>End Day
+          </button>
+          <button type="button" id="toggleTick" class="btnTop">
+            <span class="icon">pause_circle</span>Pause
+          </button>
+
+          <div class="speeds" aria-label="Speed controls">
+            <button type="button" data-speed="10000" class="btnSpeed">1×</button>
+            <button type="button" data-speed="5000" class="btnSpeed">2×</button>
+            <button type="button" data-speed="2500" class="btnSpeed">4×</button>
+          </div>
+
+          <button type="button" id="reset" class="btnTop">
+            <span class="icon">restart_alt</span>Reset
+          </button>
         </div>
       </div>
     </header>
 
-    <!-- STACKED LAYOUT: cards arranged vertically for mobile-first flow -->
-    <main class="stack">
-
-      <!-- STATE -->
+    <!-- DASHBOARD LAYOUT (minimizes page scrolling) -->
+    <main class="grid">
+      <!-- STATE (primary KPIs + rates) -->
       <section class="card card-state">
         <div class="card-head">
           <h2><span class="icon">dashboard</span>State</h2>
         </div>
 
-        <div class="stats">
+        <div class="stats kpis">
           <div class="stat">
             <label><span class="icon">groups</span>Population</label>
             <div id="pop"></div>
@@ -67,89 +88,90 @@
           </div>
         </div>
 
+        <!-- JS will render pills + details here -->
         <div class="note" id="rates"></div>
       </section>
 
-      <!-- ACTIONS -->
-      <section class="card card-actions">
-        <div class="card-head">
-          <h2><span class="icon">tune</span>Actions</h2>
-        </div>
-
-        <h3>Workforce Presets</h3>
-        <div class="actions">
-          <button type="button" data-preset="maxFood"><span class="icon">restaurant</span>Max Food</button>
-          <button type="button" data-preset="maxWood"><span class="icon">forest</span>Max Wood</button>
-          <button type="button" data-preset="balanced"><span class="icon">balance</span>Balanced</button>
-          <button type="button" data-preset="survival"><span class="icon">local_fire_department</span>Survival</button>
-        </div>
-
-        <h3>Policies & Builds</h3>
-        <div class="actions">
-          <button type="button" data-action="buildFarm"><span class="icon">agriculture</span>Build Farm</button>
-          <button type="button" data-action="ration"><span class="icon">do_not_disturb_on</span>Ration</button>
-          <button type="button" data-action="feast"><span class="icon">celebration</span>Feast</button>
-        </div>
-      </section>
-
-      <!-- WORKFORCE -->
-      <section class="card card-workforce">
-        <div class="card-head">
-          <h2><span class="icon">engineering</span>Workforce</h2>
-        </div>
-
-        <div class="row">
-          <label for="wfFood"><span class="icon">restaurant</span>Workers on Food</label>
-          <input id="wfFood" type="range" min="0" max="50" value="10" />
-          <span id="wfFoodVal">10</span>
-        </div>
-
-        <div class="row">
-          <label for="wfWood"><span class="icon">forest</span>Workers on Wood</label>
-          <input id="wfWood" type="range" min="0" max="50" value="5" />
-          <span id="wfWoodVal">5</span>
-        </div>
-
-        <div class="row">
-          <label for="wfTools"><span class="icon">handyman</span>Workers on Tools</label>
-          <input id="wfTools" type="range" min="0" max="50" value="0" />
-          <span id="wfToolsVal">0</span>
-        </div>
-
-        <div class="hint">Keep total workers ≤ population.</div>
-      </section>
-
-      <!-- BUILDINGS -->
-      <section class="card card-buildings">
-        <div class="card-head">
-          <h2><span class="icon">domain</span>Buildings</h2>
-        </div>
-
-        <div class="stats">
-          <div class="stat">
-            <label><span class="icon">agriculture</span>Farms</label>
-            <div id="farmsBld"></div>
-          </div>
-        </div>
-
-        <div class="hint">Farms boost food output. Tools boost all output but decay over time.</div>
-      </section>
-
-      <!-- EVENT -->
+      <!-- EVENT (always visible, top-right) -->
       <section class="card card-event">
         <div class="card-head">
-          <h2><span class="icon">warning</span>Event</h2>
+          <h2><span class="icon">report</span>Event</h2>
         </div>
 
-        <!-- JS owns this container's HTML -->
         <div id="eventBox" class="event empty">
           <div class="event-title">No active event</div>
           <div class="event-body">Keep the settlement alive.</div>
-          <div class="event-actions" id="eventActions"></div>
         </div>
       </section>
 
-      <!-- LOG -->
+      <!-- CONTROL PANEL (presets + actions + sliders + buildings summary) -->
+      <section class="card card-controls">
+        <div class="card-head">
+          <h2><span class="icon">tune</span>Control Panel</h2>
+        </div>
+
+        <div class="controlGrid">
+          <!-- Presets -->
+          <div class="panel">
+            <h3><span class="icon">bolt</span>Presets</h3>
+            <div class="actions">
+              <button type="button" data-preset="maxFood"><span class="icon">restaurant</span>Max Food</button>
+              <button type="button" data-preset="maxWood"><span class="icon">forest</span>Max Wood</button>
+              <button type="button" data-preset="balanced"><span class="icon">scale</span>Balanced</button>
+              <button type="button" data-preset="survival"><span class="icon">local_fire_department</span>Survival</button>
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div class="panel">
+            <h3><span class="icon">gavel</span>Decisions</h3>
+            <div class="actions">
+              <button type="button" data-action="buildFarm"><span class="icon">agriculture</span>Build Farm</button>
+              <button type="button" data-action="ration"><span class="icon">do_not_disturb_on</span>Ration</button>
+              <button type="button" data-action="feast"><span class="icon">celebration</span>Feast</button>
+            </div>
+          </div>
+
+          <!-- Workforce -->
+          <div class="panel panel-wide">
+            <h3><span class="icon">engineering</span>Workforce</h3>
+
+            <div class="row">
+              <label for="wfFood"><span class="icon">restaurant</span>Food</label>
+              <input id="wfFood" type="range" min="0" max="50" value="10" />
+              <span id="wfFoodVal">10</span>
+            </div>
+
+            <div class="row">
+              <label for="wfWood"><span class="icon">forest</span>Wood</label>
+              <input id="wfWood" type="range" min="0" max="50" value="5" />
+              <span id="wfWoodVal">5</span>
+            </div>
+
+            <div class="row">
+              <label for="wfTools"><span class="icon">handyman</span>Tools</label>
+              <input id="wfTools" type="range" min="0" max="50" value="0" />
+              <span id="wfToolsVal">0</span>
+            </div>
+
+            <div class="hint">Total workers ≤ population. Presets are quick allocations.</div>
+          </div>
+
+          <!-- Buildings -->
+          <div class="panel panel-wide">
+            <h3><span class="icon">apartment</span>Buildings</h3>
+            <div class="stats">
+              <div class="stat">
+                <label><span class="icon">agriculture</span>Farms</label>
+                <div id="farmsBld"></div>
+              </div>
+            </div>
+            <div class="hint">Farms scale food output. Tools boost output but decay daily.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- LOG (scrolls inside this panel, not the whole page) -->
       <section class="card card-log">
         <div class="card-head">
           <h2><span class="icon">receipt_long</span>Log</h2>
@@ -157,18 +179,6 @@
         <div id="log" class="log" aria-live="polite"></div>
       </section>
     </main>
-
-    <footer class="footer">
-      <button type="button" id="endDay"><span class="icon">skip_next</span>End Day</button>
-      <button type="button" id="toggleTick"><span class="icon">pause_circle</span>Pause</button>
-      <button type="button" id="reset"><span class="icon">restart_alt</span>Reset</button>
-
-      <div class="speeds" aria-label="Speed controls">
-        <button type="button" data-speed="10000">1×</button>
-        <button type="button" data-speed="5000">2×</button>
-        <button type="button" data-speed="2500">4×</button>
-      </div>
-    </footer>
   </div>
 
   <script src="game.js"></script>
