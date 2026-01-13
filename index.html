@@ -14,6 +14,7 @@
   <!-- Material Symbols (free icons) -->
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,500..700,0..1,-50..200" rel="stylesheet">
 </head>
+
 <body>
   <div class="app">
     <header class="topbar">
@@ -23,22 +24,27 @@
           <div class="meta">
             <span id="day"></span>
             <span id="statusBadge" class="badge"></span>
+            <!-- New (optional) seed display -->
+            <span class="badge badge-muted" title="Deterministic run seed">
+              Seed: <span id="seed">—</span>
+            </span>
           </div>
         </div>
 
-        <!-- Time controls moved to header so the "flow controls" are always visible -->
+        <!-- Time controls always visible -->
         <div class="topControls">
           <button type="button" id="endDay" class="btnTop">
             <span class="icon">skip_next</span>End Day
           </button>
+
           <button type="button" id="toggleTick" class="btnTop">
             <span class="icon">pause_circle</span>Pause
           </button>
 
           <div class="speeds" aria-label="Speed controls">
-            <button type="button" data-speed="10000" class="btnSpeed">1×</button>
-            <button type="button" data-speed="5000" class="btnSpeed">2×</button>
-            <button type="button" data-speed="2500" class="btnSpeed">4×</button>
+            <button type="button" data-speed="10000" class="btnSpeed" title="10s/day">1×</button>
+            <button type="button" data-speed="5000" class="btnSpeed" title="5s/day">2×</button>
+            <button type="button" data-speed="2500" class="btnSpeed" title="2.5s/day">4×</button>
           </div>
 
           <button type="button" id="reset" class="btnTop">
@@ -48,7 +54,6 @@
       </div>
     </header>
 
-    <!-- DASHBOARD LAYOUT (minimizes page scrolling) -->
     <main class="grid">
       <!-- STATE (primary KPIs + rates) -->
       <section class="card card-state">
@@ -77,9 +82,16 @@
             <div id="tools"></div>
           </div>
 
+          <!-- Backwards compatible: JS writes Mood into #mood OR #stab -->
           <div class="stat">
-            <label><span class="icon">shield</span>Stability</label>
-            <div id="stab"></div>
+            <label><span class="icon">sentiment_satisfied</span>Mood</label>
+            <div id="mood"></div>
+          </div>
+
+          <!-- New: Authority (optional id expected by new JS) -->
+          <div class="stat">
+            <label><span class="icon">shield</span>Authority</label>
+            <div id="authority"></div>
           </div>
 
           <div class="stat">
@@ -88,11 +100,32 @@
           </div>
         </div>
 
-        <!-- JS will render pills + details here -->
+        <!-- New: Pressure chips (IDs expected by new JS if present) -->
+        <div class="stats kpis kpis-pressures">
+          <div class="stat">
+            <label><span class="icon">soup_kitchen</span>Subsistence</label>
+            <div id="pSubsistence"></div>
+          </div>
+
+          <div class="stat">
+            <label><span class="icon">local_police</span>Security</label>
+            <div id="pSecurity"></div>
+          </div>
+
+          <div class="stat">
+            <label><span class="icon">account_balance</span>Extraction</label>
+            <div id="pExtraction"></div>
+          </div>
+        </div>
+
+        <!-- Optional single-line pressure debug (JS supports either approach) -->
+        <div class="hint" id="pressuresLine" aria-live="polite"></div>
+
+        <!-- JS renders pills + details here -->
         <div class="note" id="rates"></div>
       </section>
 
-      <!-- EVENT (always visible, top-right) -->
+      <!-- EVENT -->
       <section class="card card-event">
         <div class="card-head">
           <h2><span class="icon">report</span>Event</h2>
@@ -104,7 +137,7 @@
         </div>
       </section>
 
-      <!-- CONTROL PANEL (presets + actions + sliders + buildings summary) -->
+      <!-- CONTROL PANEL -->
       <section class="card card-controls">
         <div class="card-head">
           <h2><span class="icon">tune</span>Control Panel</h2>
@@ -122,13 +155,16 @@
             </div>
           </div>
 
-          <!-- Actions -->
+          <!-- Decisions -->
           <div class="panel">
             <h3><span class="icon">gavel</span>Decisions</h3>
             <div class="actions">
               <button type="button" data-action="buildFarm"><span class="icon">agriculture</span>Build Farm</button>
               <button type="button" data-action="ration"><span class="icon">do_not_disturb_on</span>Ration</button>
               <button type="button" data-action="feast"><span class="icon">celebration</span>Feast</button>
+            </div>
+            <div class="hint">
+              Mood shifts fast. Authority is slower and governs regime survival.
             </div>
           </div>
 
@@ -154,7 +190,9 @@
               <span id="wfToolsVal">0</span>
             </div>
 
-            <div class="hint">Total workers ≤ population. Presets are quick allocations.</div>
+            <div class="hint">
+              Total workers ≤ population. Presets are quick allocations. Tools boost output but decay daily.
+            </div>
           </div>
 
           <!-- Buildings -->
@@ -166,12 +204,14 @@
                 <div id="farmsBld"></div>
               </div>
             </div>
-            <div class="hint">Farms scale food output. Tools boost output but decay daily.</div>
+            <div class="hint">
+              Farms scale food output. Pressure rises under sustained shortages and low mood.
+            </div>
           </div>
         </div>
       </section>
 
-      <!-- LOG (scrolls inside this panel, not the whole page) -->
+      <!-- LOG -->
       <section class="card card-log">
         <div class="card-head">
           <h2><span class="icon">receipt_long</span>Log</h2>
