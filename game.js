@@ -1,22 +1,21 @@
-// Governance MPL - deterministic loop + manual/auto time + declarative events
-// Improvements applied vs your older version:
-// - Preset buttons: data-preset="maxFood|maxWood|balanced|survival"
-// - Tools system: workforce -> tools, tools decay, tools boost outputs
-// - wfTools slider support + tools stat rendering
-// - Farms duplicate display supported: #farms (state) + #farmsBld (buildings panel)
-// - Workforce clamping prioritizes the slider the user changed (no "slider fight")
-// - Starvation model upgraded (A + B + C):
-//     A) proportional deaths based on deficit (unfed people)
-//     B) escalating penalties via consecutive hungry days (starveDays)
-//     C) hard fail after STARVE_DAYS_GAMEOVER consecutive hungry days
-// - Rates display supports NET-first (optional via innerHTML pills)
-// - Tick remains deterministic in structure: state -> tick -> render
+// Governance MPL v3
+// Full rewrite of your JS with the requested improvements, keeping the same core architecture:
+// state → tick() → render() + declarative events, but upgraded with:
+// - Seeded RNG (deterministic runs by seed)
+// - Split Mood vs Authority (Authority is regime legitimacy; Mood is public temperature)
+// - Pressure tracks (Subsistence / Security / Extraction)
+// - Depopulation (migration) distinct from deaths
+// - Tick phases made explicit
+// - Event system moved to data-driven table (no switch), weighted by conditions
+// - Event UI uses delegation (no re-bind per render) and is deterministic
+// - Cached action/preset/speed nodes (no querySelectorAll in every render)
+// - Backwards-compatible with your existing HTML IDs; new IDs are optional
 
 (() => {
   "use strict";
 
   // -------------------------------
-  // DOM
+  // DOM helpers
   // -------------------------------
   const $ = (id) => document.getElementById(id);
 
@@ -27,7 +26,17 @@
     food: $("food"),
     wood: $("wood"),
     tools: $("tools"),
-    stab: $("stab"),
+
+    // old id: stab → now used for Mood display (backwards compatible)
+    mood: $("mood") || $("stab"),
+    authority: $("authority"), // optional id
+
+    // optional pressure ids (any/all)
+    pSubsistence: $("pSubsistence"),
+    pSecurity: $("pSecurity"),
+    pExtraction: $("pExtraction"),
+    pressuresLine: $("pressuresLine"), // optional single-line debug
+
     rates: $("rates"),
     farms: $("farms"),
     farmsBld: $("farmsBld"),
@@ -36,23 +45,36 @@
 
     toggleTick: $("toggleTick"),
     reset: $("reset"),
-    endDay: $("endDay"), // optional (present in your HTML)
+    endDay: $("endDay"),
 
+    // workforce sliders
     wfFood: $("wfFood"),
     wfWood: $("wfWood"),
     wfTools: $("wfTools"),
     wfFoodVal: $("wfFoodVal"),
     wfWoodVal: $("wfWoodVal"),
     wfToolsVal: $("wfToolsVal"),
+
+    // optional extras (future-proof)
+    season: $("season"),
+    seed: $("seed"),
+    treasury: $("treasury"),
+    taxLevel: $("taxLevel"),
+    soldiers: $("soldiers"),
+    soldiersHome: $("soldiersHome"),
+    soldiersAway: $("soldiersAway"),
   };
 
   // -------------------------------
-  // Constants (tune here)
+  // Config
   // -------------------------------
   const CONFIG = {
     // Time control
     DEFAULT_MODE: "auto", // "auto" | "manual"
-    DEFAULT_SPEED_MS: 5000, // 1 day = 5 seconds (auto mode)
+    DEFAULT_SPEED_MS: 5000,
+
+    // Determinism
+    DEFAULT_SEED: 1337,
 
     // Workforce production
     FOOD_PER_WORKER: 1.0,
@@ -61,53 +83,84 @@
 
     // Buildings
     FARM_WOOD_COST: 30,
-    FARM_FOOD_MULT_PER_FARM: 0.08, // +8% food output per farm
+    FARM_FOOD_MULT_PER_FARM: 0.08,
 
     // Tools system
-    TOOLS_SOFTCAP: 100, // beyond this gives no extra bonus
-    TOOLS_BONUS_PER_TOOL: 0.002, // 100 tools -> +20% output
+    TOOLS_SOFTCAP: 100,
+    TOOLS_BONUS_PER_TOOL: 0.002,
     TOOLS_MIN_BONUS: 1.0,
-    TOOLS_DECAY_FLAT: 1.0, // lose at least this much tools per day
-    TOOLS_DECAY_PER_POP: 0.05, // plus pop*X per day, models wear & maintenance
+    TOOLS_DECAY_FLAT: 1.0,
+    TOOLS_DECAY_PER_POP: 0.05,
 
     // Consumption
     FOOD_CONSUMPTION_PER_POP: 1.0,
     RATION_CONSUMPTION_MULT: 0.75,
     FEAST_CONSUMPTION_MULT: 1.25,
 
-    // Policies durations (days)
+    // Policies
     RATION_DAYS: 5,
     FEAST_DAYS: 3,
 
-    // Stability dynamics
-    STAB_MAX: 100,
-    STAB_MIN: 0,
+    // Mood / Authority
+    MOOD_MAX: 100,
+    MOOD_MIN: 0,
+    AUTH_MAX: 100,
+    AUTH_MIN: 0,
 
-    // Starvation penalties (baseline)
-    STARVATION_STAB_LOSS_MULT: 0.15, // per missing food unit
-    STARVATION_STAB_LOSS_MIN: 2,
-    STARVATION_STAB_LOSS_MAX: 18,
-    STARVATION_DEATH_DEFICIT_RATIO: 0.8, // only lethal if deficit is "serious" vs pop
+    // Starvation (A + B) — no hard guillotine now; authority/pressure cascade replaces it
+    STARVATION_MOOD_LOSS_MULT: 0.15,
+    STARVATION_MOOD_LOSS_MIN: 2,
+    STARVATION_MOOD_LOSS_MAX: 18,
+    STARVATION_DEATH_DEFICIT_RATIO: 0.8,
 
-    // Starvation escalation + collapse (A + B + C)
-    STARVE_DAYS_GAMEOVER: 15, // hard fail after 15 consecutive hungry days
-    STARVE_STAB_MULT_PER_DAY: 0.08, // +8% stab loss per hungry day
-    STARVE_DEATH_MULT_PER_DAY: 0.05, // +5% deaths per hungry day
-    STARVE_DEATH_MAX_PER_DAY_RATIO: 0.35, // cap deaths/day to avoid instant wipeouts
+    // Starvation escalation memory
+    STARVE_MOOD_MULT_PER_DAY: 0.08,
+    STARVE_DEATH_MULT_PER_DAY: 0.05,
+    STARVE_DEATH_MAX_PER_DAY_RATIO: 0.35,
 
-    // Ambient stability drift
-    STAB_DRIFT_UP_IF_WELL_FED_RATIO: 3, // food > pop*ratio => drift up
-    STAB_DRIFT_UP: 0.6,
-    STAB_DRIFT_CAP: 85,
-    STAB_DRIFT_DOWN_IF_TOO_HIGH: 0.2,
-    STAB_TOO_HIGH: 90,
+    // Pressure system
+    PRESSURE_MAX: 100,
+    PRESSURE_MIN: 0,
+    P_DECAY_BASE: 0.6, // daily decay when conditions allow
+    P_DECAY_BAD_COND_MULT: 0.35, // decay slows under bad conditions
+    P_SUBS_FROM_DEFICIT_MULT: 0.55, // deficit -> subsistence pressure
+    P_SUBS_STREAK_MULT: 0.25, // starveDays multiplier into subsistence pressure
+    P_SEC_FROM_LOW_MOOD_MULT: 0.12, // low mood pushes security pressure
+    P_EXTR_FROM_POLICIES_MULT: 0.0, // reserved (tax later)
+    P_SHOCK_FROM_DEATHS: 0.6, // deaths shock pressure (folded into subsistence/security via authority bleed)
+
+    // Authority drift from pressures (deterministic)
+    AUTH_BLEED_BASE: 0.25,
+    AUTH_BLEED_PSUBS_MULT: 0.045,
+    AUTH_BLEED_PSEC_MULT: 0.04,
+    AUTH_BLEED_PEXTR_MULT: 0.03,
+    AUTH_RECOVER_BASE: 0.25,
+    AUTH_RECOVER_CAP: 85,
+
+    // Mood drift (deterministic)
+    MOOD_RECOVER_IF_WELL_FED_RATIO: 3, // food > pop*ratio => mood drifts up
+    MOOD_DRIFT_UP: 0.6,
+    MOOD_DRIFT_CAP: 85,
+    MOOD_DRIFT_DOWN_IF_TOO_HIGH: 0.2,
+    MOOD_TOO_HIGH: 90,
+
+    // Depopulation (migration) — distinct from deaths
+    MIGRATION_MIN_POP: 6, // below this, effectively abandoned
+    MIGRATION_TRIGGER_PSUBS: 55,
+    MIGRATION_TRIGGER_PSEC: 55,
+    MIGRATION_TRIGGER_MOOD: 35,
+    MIGRATION_STREAK_START: 3,
+    MIGRATION_PER_DAY_MIN: 1,
+    MIGRATION_PER_DAY_MAX_RATIO: 0.08, // 8% pop/day cap
+    MIGRATION_STREAK_MULT: 0.12, // increases migration with streak
 
     // Events
     EVENT_BASE_CHANCE: 0.05,
-    EVENT_STARVATION_BONUS: 0.12,
-    EVENT_LOWSTAB_BONUS: 0.10,
-    LOW_STABILITY_THRESHOLD: 35,
-    STARVATION_RISK_FOOD_RATIO: 2, // food < pop*ratio => risk
+    EVENT_LOW_MOOD_BONUS: 0.10,
+    EVENT_HIGH_PSUBS_BONUS: 0.12,
+    EVENT_HIGH_PSEC_BONUS: 0.10,
+    EVENT_LOW_MOOD_THRESHOLD: 35,
+    EVENT_HIGH_P_THRESHOLD: 55,
 
     // Win/Lose
     WIN_DAY: 50,
@@ -121,49 +174,92 @@
     },
 
     // Rates UI mode
-    RATES_NET_FIRST: true, // uses innerHTML pills if true, else falls back to plain text
+    RATES_NET_FIRST: true,
   };
+
+  // -------------------------------
+  // Seeded RNG (deterministic)
+  // -------------------------------
+  function hashSeed(strOrNum) {
+    // Simple deterministic hash to uint32
+    const s = String(strOrNum ?? "");
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  function mulberry32(seedU32) {
+    let a = seedU32 >>> 0;
+    return function () {
+      a |= 0;
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
 
   // -------------------------------
   // State
   // -------------------------------
-  const INITIAL = () => ({
-    // timeline
-    day: 1,
-    mode: CONFIG.DEFAULT_MODE, // "auto" or "manual"
-    paused: false,
-    gameOver: false,
+  const INITIAL = (seed = CONFIG.DEFAULT_SEED) => {
+    const seedU32 = hashSeed(seed);
+    return {
+      // timeline
+      day: 1,
+      mode: CONFIG.DEFAULT_MODE,
+      paused: false,
+      gameOver: false,
+      win: false,
 
-    // core resources
-    pop: 30,
-    food: 80,
-    wood: 40,
-    tools: 10,
-    stability: 70,
+      // determinism
+      seed: seedU32,
+      rngState: seedU32, // for display; actual RNG derived per tick from rngState
+      // NOTE: we update rngState deterministically by consuming RNG draws in fixed order
 
-    // workforce
-    workersFood: 10,
-    workersWood: 5,
-    workersTools: 0,
+      // core resources
+      pop: 30,
+      food: 80,
+      wood: 40,
+      tools: 10,
 
-    // buildings
-    farms: 0,
+      // governance meters
+      mood: 70,      // public temperature (short-term)
+      authority: 70, // regime legitimacy (loss condition)
 
-    // policies (timers)
-    rationing: 0,
-    feasting: 0,
+      // pressures (0–100)
+      pSubsistence: 0,
+      pSecurity: 0,
+      pExtraction: 0,
 
-    // hunger memory
-    starveDays: 0,
+      // memory
+      starveDays: 0,
+      depopStreak: 0,
 
-    // event
-    activeEvent: null,
+      // workforce (labor pool competes with population only; soldiers can later reduce labor)
+      workersFood: 10,
+      workersWood: 5,
+      workersTools: 0,
 
-    // tick timer
-    tickSpeedMs: CONFIG.DEFAULT_SPEED_MS,
-  });
+      // buildings
+      farms: 0,
 
-  let state = INITIAL();
+      // policies
+      rationing: 0,
+      feasting: 0,
+
+      // event
+      activeEvent: null,
+
+      // tick timer
+      tickSpeedMs: CONFIG.DEFAULT_SPEED_MS,
+    };
+  };
+
+  let state = INITIAL(CONFIG.DEFAULT_SEED);
 
   // -------------------------------
   // Timer control
@@ -195,10 +291,6 @@
     return Math.max(a, Math.min(b, n));
   }
 
-  function rndInt(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-  }
-
   function fmtInt(n) {
     return String(Math.floor(n));
   }
@@ -212,10 +304,32 @@
   }
 
   function statusLabel() {
-    if (state.gameOver) return { text: "GAME OVER", tone: "bad" };
-    if (state.stability >= 75) return { text: "Stable", tone: "good" };
-    if (state.stability >= 40) return { text: "Tense", tone: "warn" };
+    // Status badge reflects MOOD (public temperature), not authority
+    if (state.gameOver) return { text: state.win ? "VICTORY" : "GAME OVER", tone: state.win ? "good" : "bad" };
+    if (state.mood >= 75) return { text: "Stable", tone: "good" };
+    if (state.mood >= 40) return { text: "Tense", tone: "warn" };
     return { text: "Unstable", tone: "bad" };
+  }
+
+  // -------------------------------
+  // Deterministic RNG per-tick
+  // -------------------------------
+  function makeRng() {
+    // Derive an RNG from current rngState; update rngState deterministically by advancing
+    // We can't “peek” without consuming; keep draw order stable.
+    const rng = mulberry32(state.rngState >>> 0);
+    function next() {
+      const r = rng();
+      // advance rngState deterministically by hashing the float bits-ish
+      // (not cryptographic; just stable). Another option would be splitmix64,
+      // but this is sufficient for deterministic gameplay.
+      state.rngState = hashSeed((state.rngState ^ (r * 1e9)) >>> 0);
+      return r;
+    }
+    function int(min, max) {
+      return Math.floor(next() * (max - min + 1)) + min;
+    }
+    return { next, int };
   }
 
   // -------------------------------
@@ -254,19 +368,15 @@
     return consumption;
   }
 
-  // Workforce clamping:
-  // - Total workers <= population
-  // - Priority: keep the slider the user changed, clamp others first
+  // Workforce clamping with priority: keep the slider the user changed
   function validateWorkforce(priorityKey = null) {
     const keys = ["workersFood", "workersWood", "workersTools"];
-
     for (const k of keys) state[k] = clamp(state[k], 0, state.pop);
 
     const total = state.workersFood + state.workersWood + state.workersTools;
     if (total <= state.pop) return;
 
     let overflow = total - state.pop;
-
     const clampOrder = keys.slice();
     if (priorityKey && clampOrder.includes(priorityKey)) {
       clampOrder.splice(clampOrder.indexOf(priorityKey), 1);
@@ -290,7 +400,6 @@
     if (!preset) return;
 
     const pop = state.pop;
-
     let f = Math.floor(pop * preset.food);
     let w = Math.floor(pop * preset.wood);
     let t = Math.floor(pop * preset.tools);
@@ -299,7 +408,6 @@
     w = Math.max(0, w);
     t = Math.max(0, t);
 
-    // Round to exactly pop: distribute remainder in deterministic order
     let used = f + w + t;
     while (used < pop) {
       f += 1; used += 1;
@@ -324,147 +432,227 @@
   }
 
   // -------------------------------
-  // Events (declarative)
+  // Event system (data-driven + deterministic)
   // -------------------------------
-  function buildEvent(key) {
-    switch (key) {
-      case "TRADERS":
-        return {
-          key,
-          title: "Wandering Traders Arrive",
-          body: "They offer food for wood. Fair deal, but your stores matter.",
-          options: [
-            {
-              label: "Trade 20 wood → 35 food",
-              can: () => state.wood >= 20,
-              apply: () => {
-                state.wood -= 20;
-                state.food += 35;
-                state.stability = clamp(state.stability + 2, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                logLine("You traded with the traders. Supplies improved.", "good");
-              },
-            },
-            {
-              label: "Refuse",
-              can: () => true,
-              apply: () => {
-                state.stability = clamp(state.stability - 1, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                logLine("You refused the traders.", "");
-              },
-            },
-          ],
-        };
+  function canAfford(cost = {}) {
+    if (cost.food && state.food < cost.food) return false;
+    if (cost.wood && state.wood < cost.wood) return false;
+    if (cost.tools && state.tools < cost.tools) return false;
+    return true;
+  }
 
-      case "THEFT":
-        return {
-          key,
-          title: "Food Theft at Night",
-          body: "Hungry citizens stole from stores. You must respond.",
-          options: [
-            {
-              label: "Punish harshly (order now, risk deaths)",
-              can: () => true,
-              apply: () => {
-                state.stability = clamp(state.stability + 6, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                if (Math.random() < 0.35) {
-                  state.pop = clamp(state.pop - 1, 0, 999999);
-                  logLine("Harsh punishment restored order—at a human cost.", "warn");
-                } else {
-                  logLine("Harsh punishment restored order.", "warn");
-                }
-              },
-            },
-            {
-              label: "Show mercy (authority down)",
-              can: () => true,
-              apply: () => {
-                state.stability = clamp(state.stability - 6, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                state.food = clamp(state.food - 6, 0, 999999);
-                logLine("Mercy preserved lives but weakened authority.", "bad");
-              },
-            },
-          ],
-        };
+  function payCost(cost = {}) {
+    if (cost.food) state.food -= cost.food;
+    if (cost.wood) state.wood -= cost.wood;
+    if (cost.tools) state.tools -= cost.tools;
+    state.food = clamp(state.food, 0, 999999);
+    state.wood = clamp(state.wood, 0, 999999);
+    state.tools = clamp(state.tools, 0, 999999);
+  }
 
-      case "RIOT":
-        return {
-          key,
-          title: "Public Riot",
-          body: "Crowds gather, angry and scared. This can spiral.",
-          options: [
-            {
-              label: "Spend 25 food to calm them",
-              can: () => state.food >= 25,
-              apply: () => {
-                state.food -= 25;
-                state.stability = clamp(state.stability + 15, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                logLine("You defused the riot with emergency supplies.", "good");
-              },
-            },
-            {
-              label: "Use force (can backfire)",
-              can: () => true,
-              apply: () => {
-                state.stability = clamp(state.stability + 8, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                if (Math.random() < 0.5) {
-                  const loss = rndInt(5, 18);
-                  state.wood = clamp(state.wood - loss, 0, 999999);
-                  state.stability = clamp(state.stability - 10, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-                  logLine(`Force backfired: property damage (-${loss} wood).`, "bad");
-                } else {
-                  logLine("Force ended the riot quickly.", "warn");
-                }
-              },
-            },
-          ],
-        };
+  function applyEffects(effects = {}) {
+    if (effects.food) state.food += effects.food;
+    if (effects.wood) state.wood += effects.wood;
+    if (effects.tools) state.tools += effects.tools;
 
-      default:
-        return {
-          key: "NONE",
-          title: "Quiet Day",
-          body: "Nothing happens.",
-          options: [{ label: "Ok", can: () => true, apply: () => {} }],
-        };
+    if (effects.mood) state.mood = clamp(state.mood + effects.mood, CONFIG.MOOD_MIN, CONFIG.MOOD_MAX);
+    if (effects.authority) state.authority = clamp(state.authority + effects.authority, CONFIG.AUTH_MIN, CONFIG.AUTH_MAX);
+
+    if (effects.pSubsistence) state.pSubsistence = clamp(state.pSubsistence + effects.pSubsistence, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+    if (effects.pSecurity) state.pSecurity = clamp(state.pSecurity + effects.pSecurity, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+    if (effects.pExtraction) state.pExtraction = clamp(state.pExtraction + effects.pExtraction, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+  }
+
+  const EVENTS = {
+    TRADERS: {
+      key: "TRADERS",
+      title: "Wandering Traders Arrive",
+      body: "They offer food for wood. A fair deal—but your stores matter.",
+      weight: () => 1.0,
+      options: [
+        {
+          label: "Trade 20 wood → 35 food",
+          can: () => canAfford({ wood: 20 }),
+          run: () => {
+            payCost({ wood: 20 });
+            applyEffects({ food: 35, mood: +2, authority: +1 });
+            logLine("You traded with the traders. Supplies improved.", "good");
+          },
+        },
+        {
+          label: "Refuse",
+          can: () => true,
+          run: () => {
+            applyEffects({ mood: -1 });
+            logLine("You refused the traders.", "");
+          },
+        },
+      ],
+    },
+
+    THEFT: {
+      key: "THEFT",
+      title: "Food Theft at Night",
+      body: "Hungry citizens stole from stores. You must respond.",
+      weight: () => (state.pSubsistence >= CONFIG.EVENT_HIGH_P_THRESHOLD ? 1.2 : 0.6),
+      options: [
+        {
+          label: "Punish harshly (order now, legitimacy risk)",
+          can: () => true,
+          run: () => {
+            const rng = makeRng();
+            applyEffects({ mood: +4, authority: +3, pSecurity: -6 });
+            if (rng.next() < 0.35) {
+              state.pop = clamp(state.pop - 1, 0, 999999);
+              applyEffects({ mood: -2, authority: -2, pSubsistence: +2 });
+              logLine("Harsh punishment restored order—at a human cost.", "warn");
+            } else {
+              logLine("Harsh punishment restored order.", "warn");
+            }
+          },
+        },
+        {
+          label: "Show mercy (authority down)",
+          can: () => true,
+          run: () => {
+            applyEffects({ authority: -6, mood: -2, food: -6, pSecurity: +4 });
+            logLine("Mercy preserved lives but weakened authority.", "bad");
+          },
+        },
+      ],
+    },
+
+    RIOT: {
+      key: "RIOT",
+      title: "Public Riot",
+      body: "Crowds gather—angry, scared. This can spiral.",
+      weight: () => (state.pSecurity >= CONFIG.EVENT_HIGH_P_THRESHOLD ? 1.2 : 0.7),
+      options: [
+        {
+          label: "Spend 25 food to calm them",
+          can: () => canAfford({ food: 25 }),
+          run: () => {
+            payCost({ food: 25 });
+            applyEffects({ mood: +10, authority: +6, pSecurity: -10, pSubsistence: -6 });
+            logLine("You defused the riot with emergency supplies.", "good");
+          },
+        },
+        {
+          label: "Use force (can backfire)",
+          can: () => true,
+          run: () => {
+            const rng = makeRng();
+            applyEffects({ mood: +3, authority: +4, pSecurity: -5 });
+            if (rng.next() < 0.5) {
+              const loss = rng.int(5, 18);
+              state.wood = clamp(state.wood - loss, 0, 999999);
+              applyEffects({ mood: -7, authority: -5, pSecurity: +6 });
+              logLine(`Force backfired: property damage (-${loss} wood).`, "bad");
+            } else {
+              logLine("Force ended the riot quickly.", "warn");
+            }
+          },
+        },
+      ],
+    },
+
+    COUP_WHISPERS: {
+      key: "COUP_WHISPERS",
+      title: "Whispers of a Coup",
+      body: "Elites doubt your mandate. They watch for weakness.",
+      weight: () => {
+        // More likely when authority is low or pressures are high
+        const a = 1 + (50 - state.authority) * 0.03;
+        const p = 1 + (state.pSubsistence + state.pSecurity) * 0.004;
+        return clamp(a * p, 0.2, 2.2);
+      },
+      options: [
+        {
+          label: "Concessions (mood up, authority mixed)",
+          can: () => true,
+          run: () => {
+            applyEffects({ mood: +6, authority: -2, pExtraction: +4 });
+            logLine("Concessions eased tension but signaled weakness.", "warn");
+          },
+        },
+        {
+          label: "Purge plotters (authority up, mood down)",
+          can: () => true,
+          run: () => {
+            applyEffects({ authority: +6, mood: -6, pSecurity: +5 });
+            logLine("You purged plotters. Control rose; fear spread.", "warn");
+          },
+        },
+      ],
+    },
+  };
+
+  function computeEventChance() {
+    let chance = CONFIG.EVENT_BASE_CHANCE;
+
+    if (state.mood < CONFIG.EVENT_LOW_MOOD_THRESHOLD) chance += CONFIG.EVENT_LOW_MOOD_BONUS;
+    if (state.pSubsistence >= CONFIG.EVENT_HIGH_P_THRESHOLD) chance += CONFIG.EVENT_HIGH_PSUBS_BONUS;
+    if (state.pSecurity >= CONFIG.EVENT_HIGH_P_THRESHOLD) chance += CONFIG.EVENT_HIGH_PSEC_BONUS;
+
+    // Clamp to sensible range
+    return clamp(chance, 0, 0.65);
+  }
+
+  function pickWeightedEvent(keys, rng) {
+    // deterministic weighted pick
+    let total = 0;
+    const weights = keys.map((k) => {
+      const w = clamp(EVENTS[k]?.weight?.() ?? 0, 0, 5);
+      total += w;
+      return w;
+    });
+    if (total <= 0) return null;
+
+    let roll = rng.next() * total;
+    for (let i = 0; i < keys.length; i++) {
+      roll -= weights[i];
+      if (roll <= 0) return keys[i];
     }
+    return keys[keys.length - 1];
   }
 
   function maybeTriggerEvent() {
     if (state.activeEvent || state.gameOver) return;
 
-    const starvationRisk = state.food < state.pop * CONFIG.STARVATION_RISK_FOOD_RATIO;
-    const lowStability = state.stability < CONFIG.LOW_STABILITY_THRESHOLD;
+    const rng = makeRng();
+    const chance = computeEventChance();
+    if (rng.next() > chance) return;
 
-    let chance = CONFIG.EVENT_BASE_CHANCE;
-    if (starvationRisk) chance += CONFIG.EVENT_STARVATION_BONUS;
-    if (lowStability) chance += CONFIG.EVENT_LOWSTAB_BONUS;
-
-    if (Math.random() > chance) return;
-
+    // Build pool deterministically by conditions
     const pool = ["TRADERS"];
-    if (starvationRisk) pool.push("THEFT");
-    if (lowStability) pool.push("RIOT");
 
-    const pick = pool[rndInt(0, pool.length - 1)];
-    state.activeEvent = buildEvent(pick);
+    if (state.pSubsistence >= CONFIG.EVENT_HIGH_P_THRESHOLD) pool.push("THEFT");
+    if (state.pSecurity >= CONFIG.EVENT_HIGH_P_THRESHOLD || state.mood < CONFIG.EVENT_LOW_MOOD_THRESHOLD) pool.push("RIOT");
+    if (state.authority < 45 || (state.pSubsistence + state.pSecurity) > 110) pool.push("COUP_WHISPERS");
+
+    const pick = pickWeightedEvent(pool, rng);
+    if (!pick) return;
+
+    state.activeEvent = pick;
     renderEvent();
   }
 
   function resolveEvent(optionIndex) {
-    const ev = state.activeEvent;
+    if (!state.activeEvent) return;
+    const ev = EVENTS[state.activeEvent];
     if (!ev) return;
 
     const opt = ev.options?.[optionIndex];
     if (!opt || !opt.can()) return;
 
-    opt.apply();
+    opt.run();
     state.activeEvent = null;
     renderEvent();
     render();
   }
 
   // -------------------------------
-  // Actions (player-driven)
+  // Player actions
   // -------------------------------
   const actions = {
     buildFarm: () => {
@@ -475,14 +663,16 @@
       }
       state.wood -= cost;
       state.farms += 1;
-      state.stability = clamp(state.stability + 2, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
+      // Farms improve subsistence confidence slightly
+      applyEffects({ mood: +2, authority: +1, pSubsistence: -2 });
       logLine("Built a farm. Food output will scale better.", "good");
     },
 
     ration: () => {
       state.rationing = CONFIG.RATION_DAYS;
       state.feasting = 0;
-      state.stability = clamp(state.stability - 6, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
+      // Rationing: mood down, authority slight up (discipline), subsistence pressure may ease (less consumption)
+      applyEffects({ mood: -6, authority: +1, pSecurity: +2 });
       logLine(`Rationing enforced for ${CONFIG.RATION_DAYS} days.`, "warn");
     },
 
@@ -494,34 +684,191 @@
       state.feasting = CONFIG.FEAST_DAYS;
       state.rationing = 0;
       state.food -= 10;
-      state.stability = clamp(state.stability + 8, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
+      applyEffects({ mood: +8, authority: +2, pSubsistence: -3 });
       logLine(`Feast declared for ${CONFIG.FEAST_DAYS} days.`, "good");
     },
   };
 
-  function wireActionButtons() {
-    document.querySelectorAll("button[data-action]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (state.gameOver) return;
-        const key = btn.getAttribute("data-action");
-        const fn = actions[key];
-        if (typeof fn !== "function") return;
-        fn();
-        render();
-      });
-    });
+  // -------------------------------
+  // Tick phases
+  // -------------------------------
+  function phaseValidate() {
+    validateWorkforce(null);
   }
 
-  function wirePresetButtons() {
-    document.querySelectorAll("button[data-preset]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (state.gameOver) return;
-        const key = btn.getAttribute("data-preset");
-        applyPreset(key);
-        syncWorkforceUItoState();
-        render();
-      });
-    });
+  function phasePolicyTimers() {
+    if (state.rationing > 0) state.rationing -= 1;
+    if (state.feasting > 0) state.feasting -= 1;
+  }
+
+  function phaseProduction() {
+    const fp = foodPerDay();
+    const wp = woodPerDay();
+    const tp = toolsPerDay();
+
+    state.food += fp;
+    state.wood += wp;
+    state.tools += tp;
+  }
+
+  function phaseMaintenance() {
+    state.tools = clamp(state.tools - toolsDecayPerDay(), 0, 999999);
+  }
+
+  function phaseConsumption() {
+    const cons = foodConsumptionPerDay();
+    state.food -= cons;
+
+    // return deficit if any
+    if (state.food < 0) {
+      const deficit = Math.abs(state.food);
+      state.food = 0;
+      return deficit;
+    }
+    return 0;
+  }
+
+  function phaseStarvation(deficit) {
+    if (deficit <= 0) {
+      state.starveDays = 0;
+      return { deaths: 0, moodLoss: 0 };
+    }
+
+    state.starveDays += 1;
+
+    // Mood loss escalates with streak
+    const moodMult = 1 + state.starveDays * CONFIG.STARVE_MOOD_MULT_PER_DAY;
+    const baseMoodLoss = clamp(
+      deficit * CONFIG.STARVATION_MOOD_LOSS_MULT,
+      CONFIG.STARVATION_MOOD_LOSS_MIN,
+      CONFIG.STARVATION_MOOD_LOSS_MAX
+    );
+    const moodLoss = clamp(
+      baseMoodLoss * moodMult,
+      CONFIG.STARVATION_MOOD_LOSS_MIN,
+      CONFIG.STARVATION_MOOD_LOSS_MAX
+    );
+    state.mood = clamp(state.mood - moodLoss, CONFIG.MOOD_MIN, CONFIG.MOOD_MAX);
+
+    // Deaths: proportional to unfed, escalates with streak, capped per day
+    const unfed = Math.ceil(deficit / CONFIG.FOOD_CONSUMPTION_PER_POP);
+    const deathMult = 1 + state.starveDays * CONFIG.STARVE_DEATH_MULT_PER_DAY;
+    const rawDeaths = Math.floor(unfed * deathMult);
+    const maxDeaths = Math.max(1, Math.floor(state.pop * CONFIG.STARVE_DEATH_MAX_PER_DAY_RATIO));
+    const deaths = clamp(rawDeaths, 1, maxDeaths);
+
+    // Only lethal if deficit is serious relative to pop
+    if (deficit > state.pop * CONFIG.STARVATION_DEATH_DEFICIT_RATIO) {
+      state.pop = clamp(state.pop - deaths, 0, 999999);
+      logLine(`Starvation killed ${deaths} people. (streak: ${state.starveDays}d)`, "bad");
+      return { deaths, moodLoss };
+    } else {
+      logLine(`Food shortage reduced mood. (streak: ${state.starveDays}d)`, "warn");
+      return { deaths: 0, moodLoss };
+    }
+  }
+
+  function phasePressures(deficit, starvationOutcome) {
+    // Determine “bad conditions”
+    const isHungry = deficit > 0;
+    const wellFed = state.food > state.pop * CONFIG.MOOD_RECOVER_IF_WELL_FED_RATIO;
+
+    // Subsistence pressure from deficit + streak
+    if (isHungry) {
+      const add =
+        deficit * CONFIG.P_SUBS_FROM_DEFICIT_MULT +
+        state.starveDays * CONFIG.P_SUBS_STREAK_MULT;
+      state.pSubsistence = clamp(state.pSubsistence + add, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+    } else {
+      // mild subsistence relief when stable
+      state.pSubsistence = clamp(state.pSubsistence - CONFIG.P_DECAY_BASE * (wellFed ? 1.15 : 1.0), CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+    }
+
+    // Security pressure rises if mood is low (unrest propensity)
+    if (state.mood < 50) {
+      const add = (50 - state.mood) * CONFIG.P_SEC_FROM_LOW_MOOD_MULT;
+      state.pSecurity = clamp(state.pSecurity + add, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+    } else {
+      state.pSecurity = clamp(state.pSecurity - CONFIG.P_DECAY_BASE, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+    }
+
+    // Extraction pressure (reserved; decays slowly for now)
+    state.pExtraction = clamp(state.pExtraction - (CONFIG.P_DECAY_BASE * 0.5), CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+
+    // Shock from deaths (fold into subsistence/security)
+    if (starvationOutcome.deaths > 0) {
+      const shock = starvationOutcome.deaths * CONFIG.P_SHOCK_FROM_DEATHS;
+      state.pSubsistence = clamp(state.pSubsistence + shock * 0.6, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+      state.pSecurity = clamp(state.pSecurity + shock * 0.4, CONFIG.PRESSURE_MIN, CONFIG.PRESSURE_MAX);
+    }
+
+    // Under bad conditions, pressure decay should slow (handled implicitly above)
+    // Keep this function deterministic and free of RNG.
+  }
+
+  function phaseAuthorityMoodDrift() {
+    // Mood drift (planning-friendly): well-fed improves mood, too-high mood drifts down
+    if (state.food > state.pop * CONFIG.MOOD_RECOVER_IF_WELL_FED_RATIO && state.mood < CONFIG.MOOD_DRIFT_CAP) {
+      state.mood = clamp(state.mood + CONFIG.MOOD_DRIFT_UP, CONFIG.MOOD_MIN, CONFIG.MOOD_MAX);
+    }
+    if (state.mood > CONFIG.MOOD_TOO_HIGH) {
+      state.mood = clamp(state.mood - CONFIG.MOOD_DRIFT_DOWN_IF_TOO_HIGH, CONFIG.MOOD_MIN, CONFIG.MOOD_MAX);
+    }
+
+    // Authority drift from pressures (primary governance loss condition)
+    const pressureBleed =
+      CONFIG.AUTH_BLEED_BASE +
+      state.pSubsistence * CONFIG.AUTH_BLEED_PSUBS_MULT +
+      state.pSecurity * CONFIG.AUTH_BLEED_PSEC_MULT +
+      state.pExtraction * CONFIG.AUTH_BLEED_PEXTR_MULT;
+
+    // Recovery if pressures are low and mood isn't collapsing
+    const pressuresLow = (state.pSubsistence + state.pSecurity + state.pExtraction) < 45;
+    const canRecover = pressuresLow && state.mood >= 45 && state.authority < CONFIG.AUTH_RECOVER_CAP;
+
+    if (canRecover) {
+      state.authority = clamp(state.authority + CONFIG.AUTH_RECOVER_BASE, CONFIG.AUTH_MIN, CONFIG.AUTH_MAX);
+    } else {
+      state.authority = clamp(state.authority - pressureBleed, CONFIG.AUTH_MIN, CONFIG.AUTH_MAX);
+    }
+  }
+
+  function phaseDepopulation() {
+    // Depopulation as migration, not death
+    const badSubs = state.pSubsistence >= CONFIG.MIGRATION_TRIGGER_PSUBS;
+    const badSec = state.pSecurity >= CONFIG.MIGRATION_TRIGGER_PSEC;
+    const lowMood = state.mood <= CONFIG.MIGRATION_TRIGGER_MOOD;
+
+    if (badSubs && badSec && lowMood) state.depopStreak += 1;
+    else state.depopStreak = 0;
+
+    if (state.depopStreak < CONFIG.MIGRATION_STREAK_START) return;
+
+    // Migration amount escalates with streak, capped
+    const cap = Math.max(CONFIG.MIGRATION_PER_DAY_MIN, Math.floor(state.pop * CONFIG.MIGRATION_PER_DAY_MAX_RATIO));
+    const base = CONFIG.MIGRATION_PER_DAY_MIN;
+    const extra = Math.floor(state.pop * (state.depopStreak * CONFIG.MIGRATION_STREAK_MULT));
+    const leaving = clamp(base + extra, CONFIG.MIGRATION_PER_DAY_MIN, cap);
+
+    if (leaving > 0 && state.pop > 0) {
+      state.pop = clamp(state.pop - leaving, 0, 999999);
+      // Migration tends to reduce security and authority (loss of faith / hollowing out)
+      state.mood = clamp(state.mood - 1.5, CONFIG.MOOD_MIN, CONFIG.MOOD_MAX);
+      state.authority = clamp(state.authority - 1.0, CONFIG.AUTH_MIN, CONFIG.AUTH_MAX);
+      logLine(`Migration: ${leaving} people left the settlement. (streak: ${state.depopStreak}d)`, "warn");
+    }
+  }
+
+  function phaseEvents() {
+    maybeTriggerEvent();
+  }
+
+  function phaseEndChecks() {
+    if (state.pop <= 0) return endGame("Population collapsed.");
+    if (state.pop <= CONFIG.MIGRATION_MIN_POP) return endGame("The settlement was abandoned.");
+    if (state.authority <= 0) return endGame("Authority collapsed. You were removed from power.");
+    if (state.day >= CONFIG.WIN_DAY) return endGame(`You survived ${CONFIG.WIN_DAY} days. MPL complete.`, true);
+    return null;
   }
 
   // -------------------------------
@@ -531,108 +878,50 @@
     if (state.gameOver) return;
     if (state.paused && state.mode === "auto") return;
 
-    validateWorkforce(null);
+    // 1) Validate workforce
+    phaseValidate();
 
-    // Policy timers
-    if (state.rationing > 0) state.rationing -= 1;
-    if (state.feasting > 0) state.feasting -= 1;
+    // 2) Policy timers
+    phasePolicyTimers();
 
-    // Production
-    const fp = foodPerDay();
-    const wp = woodPerDay();
-    const tp = toolsPerDay();
+    // 3) Production
+    phaseProduction();
 
-    state.food += fp;
-    state.wood += wp;
-    state.tools += tp;
+    // 4) Maintenance / decay
+    phaseMaintenance();
 
-    // Tools decay
-    state.tools = clamp(state.tools - toolsDecayPerDay(), 0, 999999);
+    // 5) Consumption → deficit
+    const deficit = phaseConsumption();
 
-    // Consumption
-    const cons = foodConsumptionPerDay();
-    state.food -= cons;
+    // 6) Starvation (mood + possibly deaths)
+    const starvationOutcome = phaseStarvation(deficit);
 
-    // ---------------------------
-    // Starvation (A + B + C)
-    // ---------------------------
-    let deficit = 0;
-    if (state.food < 0) {
-      deficit = Math.abs(state.food);
-      state.food = 0;
-    }
+    // 7) Pressure update (subsistence / security / extraction)
+    phasePressures(deficit, starvationOutcome);
 
-    // Hunger memory
-    if (deficit > 0) state.starveDays += 1;
-    else state.starveDays = 0;
+    // 8) Authority + mood drift (derived, deterministic)
+    phaseAuthorityMoodDrift();
 
-    if (deficit > 0) {
-      const stabMult = 1 + state.starveDays * CONFIG.STARVE_STAB_MULT_PER_DAY;
-      const deathMult = 1 + state.starveDays * CONFIG.STARVE_DEATH_MULT_PER_DAY;
+    // 9) Depopulation (migration)
+    phaseDepopulation();
 
-      // Stability loss (escalates)
-      const baseStabLoss = clamp(
-        deficit * CONFIG.STARVATION_STAB_LOSS_MULT,
-        CONFIG.STARVATION_STAB_LOSS_MIN,
-        CONFIG.STARVATION_STAB_LOSS_MAX
-      );
-      const stabLoss = clamp(
-        baseStabLoss * stabMult,
-        CONFIG.STARVATION_STAB_LOSS_MIN,
-        CONFIG.STARVATION_STAB_LOSS_MAX
-      );
-      state.stability = clamp(state.stability - stabLoss, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
+    // 10) Events
+    phaseEvents();
 
-      // A: proportional deaths based on unfed people
-      const unfed = Math.ceil(deficit / CONFIG.FOOD_CONSUMPTION_PER_POP);
+    // 11) End checks (authority now governs regime loss)
+    const ended = phaseEndChecks();
+    if (ended) return;
 
-      // Scale with streak, cap per day
-      const rawDeaths = Math.floor(unfed * deathMult);
-      const maxDeaths = Math.max(1, Math.floor(state.pop * CONFIG.STARVE_DEATH_MAX_PER_DAY_RATIO));
-      const deaths = clamp(rawDeaths, 1, maxDeaths);
-
-      // Only lethal if deficit is serious relative to pop
-      if (deficit > state.pop * CONFIG.STARVATION_DEATH_DEFICIT_RATIO) {
-        state.pop = clamp(state.pop - deaths, 0, 999999);
-        logLine(`Starvation killed ${deaths} people. (streak: ${state.starveDays}d)`, "bad");
-      } else {
-        logLine(`Food shortage reduced stability. (streak: ${state.starveDays}d)`, "warn");
-      }
-
-      // C: hard fail if famine lasts too long
-      if (state.starveDays >= CONFIG.STARVE_DAYS_GAMEOVER) {
-        return endGame(`Famine collapse: ${state.starveDays} consecutive hungry days.`);
-      }
-    }
-
-    // Ambient drift
-    if (
-      state.food > state.pop * CONFIG.STAB_DRIFT_UP_IF_WELL_FED_RATIO &&
-      state.stability < CONFIG.STAB_DRIFT_CAP
-    ) {
-      state.stability = clamp(state.stability + CONFIG.STAB_DRIFT_UP, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-    }
-    if (state.stability > CONFIG.STAB_TOO_HIGH) {
-      state.stability = clamp(state.stability - CONFIG.STAB_DRIFT_DOWN_IF_TOO_HIGH, CONFIG.STAB_MIN, CONFIG.STAB_MAX);
-    }
-
-    // Events
-    maybeTriggerEvent();
-
-    // Lose conditions
-    if (state.pop <= 0) return endGame("Population collapsed.");
-    if (state.stability <= 0) return endGame("Authority collapsed.");
-
-    // Win condition
-    if (state.day >= CONFIG.WIN_DAY) return endGame(`You survived ${CONFIG.WIN_DAY} days. MPL complete.`, true);
-
-    // Advance time
+    // 12) Advance time
     state.day += 1;
+
+    // 13) Render
     render();
   }
 
   function endGame(reason, win = false) {
     state.gameOver = true;
+    state.win = !!win;
     logLine(reason, win ? "good" : "bad");
     applyTimeControl();
     render();
@@ -644,8 +933,8 @@
   function renderEvent() {
     if (!ui.eventBox) return;
 
-    const ev = state.activeEvent;
-    if (!ev) {
+    const key = state.activeEvent;
+    if (!key) {
       ui.eventBox.className = "event empty";
       ui.eventBox.innerHTML = `
         <div class="event-title">No active event</div>
@@ -654,7 +943,19 @@
       return;
     }
 
+    const ev = EVENTS[key];
+    if (!ev) {
+      ui.eventBox.className = "event empty";
+      ui.eventBox.innerHTML = `
+        <div class="event-title">No active event</div>
+        <div class="event-body">Keep the settlement alive.</div>
+      `;
+      state.activeEvent = null;
+      return;
+    }
+
     ui.eventBox.className = "event";
+
     const actionsHtml = (ev.options || [])
       .map((opt, idx) => {
         const disabled = opt.can() ? "" : "disabled";
@@ -667,10 +968,6 @@
       <div class="event-body">${ev.body}</div>
       <div class="event-actions">${actionsHtml}</div>
     `;
-
-    ui.eventBox.querySelectorAll("button[data-ev]").forEach((b) => {
-      b.addEventListener("click", () => resolveEvent(Number(b.getAttribute("data-ev"))));
-    });
   }
 
   function syncWorkforceUItoState() {
@@ -681,13 +978,11 @@
       ui.wfFood.value = String(state.workersFood);
       if (ui.wfFoodVal) ui.wfFoodVal.textContent = String(state.workersFood);
     }
-
     if (ui.wfWood) {
       ui.wfWood.max = popStr;
       ui.wfWood.value = String(state.workersWood);
       if (ui.wfWoodVal) ui.wfWoodVal.textContent = String(state.workersWood);
     }
-
     if (ui.wfTools) {
       ui.wfTools.max = popStr;
       ui.wfTools.value = String(state.workersTools);
@@ -715,6 +1010,7 @@
     ].filter(Boolean).join(" ");
 
     const hunger = `Hunger(${state.starveDays}d)`;
+    const depop = state.depopStreak > 0 ? `Depop(${state.depopStreak}d)` : `Depop(0d)`;
 
     if (CONFIG.RATES_NET_FIRST) {
       const foodClass = netFood >= 0 ? "good" : "bad";
@@ -731,7 +1027,7 @@
           Tools: ×${toolMult.toFixed(2)} (-${decay.toFixed(1)}) ·
           Mode: ${state.mode}${state.mode === "auto" ? ` @ ${Math.round(state.tickSpeedMs / 1000)}s/day` : ""} ·
           Policies: ${pol || "none"} ·
-          ${hunger}
+          ${hunger} · ${depop}
         </div>`;
     } else {
       ui.rates.textContent =
@@ -739,7 +1035,22 @@
         `Food: +${fp.toFixed(1)} -${cons.toFixed(1)}. ` +
         `Tools: ×${toolMult.toFixed(2)} (-${decay.toFixed(1)}/day). ` +
         `Mode: ${state.mode}${state.mode === "auto" ? ` @ ${Math.round(state.tickSpeedMs / 1000)}s/day` : ""}. ` +
-        `Policies: ${pol || "none"}. ${hunger}.`;
+        `Policies: ${pol || "none"}. Hunger(${state.starveDays}d). Depop(${state.depopStreak}d).`;
+    }
+  }
+
+  function renderPressures() {
+    // Priority: dedicated IDs if present; fallback to single line if present
+    const ps = fmtInt(state.pSubsistence);
+    const psec = fmtInt(state.pSecurity);
+    const pex = fmtInt(state.pExtraction);
+
+    if (ui.pSubsistence) ui.pSubsistence.textContent = ps;
+    if (ui.pSecurity) ui.pSecurity.textContent = psec;
+    if (ui.pExtraction) ui.pExtraction.textContent = pex;
+
+    if (ui.pressuresLine) {
+      ui.pressuresLine.textContent = `Pressure — Subs:${ps} Sec:${psec} Extr:${pex}`;
     }
   }
 
@@ -759,22 +1070,32 @@
     if (ui.food) ui.food.textContent = fmtInt(state.food);
     if (ui.wood) ui.wood.textContent = fmtInt(state.wood);
     if (ui.tools) ui.tools.textContent = fmtInt(state.tools);
-    if (ui.stab) ui.stab.textContent = `${fmtInt(state.stability)} / ${CONFIG.STAB_MAX}`;
 
+    // Mood display (backwards compatible with #stab)
+    if (ui.mood) ui.mood.textContent = `${fmtInt(state.mood)} / ${CONFIG.MOOD_MAX}`;
+
+    // Authority display (optional)
+    if (ui.authority) ui.authority.textContent = `${fmtInt(state.authority)} / ${CONFIG.AUTH_MAX}`;
+
+    // Farms dual render supported
     if (ui.farms) ui.farms.textContent = fmtInt(state.farms);
     if (ui.farmsBld) ui.farmsBld.textContent = fmtInt(state.farms);
 
+    // Seed display (optional)
+    if (ui.seed) ui.seed.textContent = String(state.seed >>> 0);
+
+    renderPressures();
     renderRates();
 
-    // Disable/enable action buttons
-    document.querySelectorAll("button[data-action]").forEach((btn) => {
+    // Disable/enable action buttons (cached)
+    for (const btn of cached.actionButtons) {
       const key = btn.getAttribute("data-action");
       const over = state.gameOver;
 
       if (key === "buildFarm") btn.disabled = over || state.wood < CONFIG.FARM_WOOD_COST;
       else if (key === "feast") btn.disabled = over || state.food < 20;
       else btn.disabled = over;
-    });
+    }
 
     // Update toggle tick label
     if (ui.toggleTick) {
@@ -789,11 +1110,49 @@
     }
 
     syncWorkforceUItoState();
+    renderEvent();
   }
 
   // -------------------------------
-  // Wiring: UI controls
+  // Wiring (cached nodes + delegation)
   // -------------------------------
+  const cached = {
+    actionButtons: [],
+    presetButtons: [],
+    speedButtons: [],
+  };
+
+  function cacheUiNodes() {
+    cached.actionButtons = Array.from(document.querySelectorAll("button[data-action]"));
+    cached.presetButtons = Array.from(document.querySelectorAll("button[data-preset]"));
+    cached.speedButtons = Array.from(document.querySelectorAll("[data-speed]"));
+  }
+
+  function wireActionButtons() {
+    for (const btn of cached.actionButtons) {
+      btn.addEventListener("click", () => {
+        if (state.gameOver) return;
+        const key = btn.getAttribute("data-action");
+        const fn = actions[key];
+        if (typeof fn !== "function") return;
+        fn();
+        render();
+      });
+    }
+  }
+
+  function wirePresetButtons() {
+    for (const btn of cached.presetButtons) {
+      btn.addEventListener("click", () => {
+        if (state.gameOver) return;
+        const key = btn.getAttribute("data-preset");
+        applyPreset(key);
+        syncWorkforceUItoState();
+        render();
+      });
+    }
+  }
+
   function wireWorkforceSliders() {
     if (ui.wfFood) {
       ui.wfFood.addEventListener("input", () => {
@@ -823,10 +1182,19 @@
     }
   }
 
+  function wireEventBoxDelegation() {
+    if (!ui.eventBox) return;
+    ui.eventBox.addEventListener("click", (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLElement)) return;
+      const idx = t.getAttribute("data-ev");
+      if (idx === null) return;
+      if (state.gameOver) return;
+      resolveEvent(Number(idx));
+    });
+  }
+
   function wireTimeControls() {
-    // ToggleTick behavior:
-    // - If manual mode: switches to auto and starts ticking
-    // - If auto mode: pause/resume
     if (ui.toggleTick) {
       ui.toggleTick.addEventListener("click", () => {
         if (state.gameOver) return;
@@ -845,7 +1213,6 @@
       });
     }
 
-    // Manual End Day
     if (ui.endDay) {
       ui.endDay.addEventListener("click", () => {
         if (state.gameOver) return;
@@ -853,8 +1220,7 @@
       });
     }
 
-    // Optional speed buttons: any element with data-speed="ms"
-    document.querySelectorAll("[data-speed]").forEach((btn) => {
+    for (const btn of cached.speedButtons) {
       btn.addEventListener("click", () => {
         if (state.gameOver) return;
 
@@ -863,7 +1229,6 @@
 
         state.tickSpeedMs = ms;
 
-        // If currently manual, switch to auto so speed matters
         if (state.mode !== "auto") {
           state.mode = "auto";
           state.paused = false;
@@ -874,7 +1239,7 @@
         applyTimeControl();
         render();
       });
-    });
+    }
   }
 
   function wireReset() {
@@ -882,12 +1247,13 @@
 
     ui.reset.addEventListener("click", () => {
       stopAutoTick();
-      state = INITIAL();
+      // Keep same seed for reproducibility unless you change CONFIG.DEFAULT_SEED
+      const seedToUse = state.seed >>> 0;
+      state = INITIAL(seedToUse);
 
       if (ui.log) ui.log.innerHTML = "";
-      logLine("New run started.", "");
+      logLine(`New run started. Seed: ${state.seed >>> 0}`, "");
 
-      renderEvent();
       render();
       applyTimeControl();
     });
@@ -911,15 +1277,16 @@
   // Boot
   // -------------------------------
   function boot() {
+    cacheUiNodes();
     wireActionButtons();
     wirePresetButtons();
     wireWorkforceSliders();
+    wireEventBoxDelegation();
     wireTimeControls();
     wireReset();
     wireModeHotkey();
 
-    logLine("New run started.", "");
-    renderEvent();
+    logLine(`New run started. Seed: ${state.seed >>> 0}`, "");
     render();
     applyTimeControl();
   }
